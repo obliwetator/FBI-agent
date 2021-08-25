@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::prelude::*;
 use std::sync::Arc;
 
 use serenity::{
@@ -12,7 +11,10 @@ use songbird::{
     model::payload::{ClientConnect, ClientDisconnect, Speaking},
     CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler,
 };
-use tokio::io::AsyncWriteExt;
+use tokio::{
+    io::AsyncWriteExt,
+    process::{Child, Command},
+};
 
 pub const RECORDING_FILE_PATH: &str = "/home/ubuntu/FBIagent/voice_recordings";
 const DISCORD_SAMPLE_RATE: u16 = 48000;
@@ -24,11 +26,12 @@ struct Receiver {
     /// If the value is none that means we don't want to record that user (for now bots)
     ssrc_hashmap: Arc<Mutex<HashMap<u32, Option<u64>>>>,
     user_id_hashmap: Arc<Mutex<HashMap<u64, u32>>>,
-    ssrc_ffmpeg_hashmap: Arc<Mutex<HashMap<u32, std::process::Child>>>,
+    ssrc_ffmpeg_hashmap: Arc<Mutex<HashMap<u32, Child>>>,
     // Each ssrc needs to have it's own buffer
     buffer: Arc<Mutex<HashMap<u32, Vec<i16>>>>,
     now: Arc<Mutex<HashMap<u32, std::time::Instant>>>,
     guild_id: GuildId,
+    user_status: Arc<Mutex<HashMap<u32, UserStatus>>>,
 }
 
 impl Receiver {
@@ -43,6 +46,29 @@ impl Receiver {
             buffer: Arc::new(Mutex::new(HashMap::new())),
             now: Arc::new(Mutex::new(HashMap::new())),
             guild_id,
+            user_status: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+struct UserStatus {
+    user_id: u64,
+    start: std::time::Instant,
+    speaking: bool,
+    time_passed: f64,
+    start2: std::time::Instant,
+    time_passed2: f64,
+}
+
+impl UserStatus {
+    fn new(user_id: u64, start: std::time::Instant, muted: bool) -> Self {
+        Self {
+            user_id,
+            start,
+            speaking: muted,
+            time_passed: 0.0,
+            start2: std::time::Instant::now(),
+            time_passed2: 0.0,
         }
     }
 }
@@ -106,13 +132,20 @@ impl VoiceEventHandler for Receiver {
                     }
 
                     {
+                        self.user_status.lock().await.insert(
+                            *ssrc,
+                            UserStatus::new(user_id.unwrap().0, std::time::Instant::now(), false),
+                        );
+                    }
+
+                    {
                         if self.ssrc_ffmpeg_hashmap.lock().await.get(ssrc).is_some() {
                             // we have already spawned an ffmpeg process
                         } else {
                             // Create a process
                             let path = create_path(*ssrc, self.guild_id, user_id.unwrap().0).await;
 
-                            let command = std::process::Command::new("ffmpeg")
+                            let command = Command::new("ffmpeg")
                                 .args(["-channel_layout", "stereo"])
                                 .args(["-ac", "2"]) // channel count
                                 .args(["-ar", "48000"]) // sample rate
@@ -121,8 +154,8 @@ impl VoiceEventHandler for Receiver {
                                 .args(["-b:a", "64k"]) // bitrate
                                 .arg(format!("{}.ogg", path)) // output
                                 .stdin(std::process::Stdio::piped())
-                                .stderr(std::process::Stdio::piped())
-                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
                                 .spawn();
 
                             let child = command.unwrap();
@@ -166,57 +199,45 @@ impl VoiceEventHandler for Receiver {
                 // TODO: When user is silence add 0's to the file
                 // 1) Count how long the user wasn't speaking. Add the equivalent ammount on the next packet update
                 // 2) While the user is set as stopped contiously add 0's (much harder?)
-                println!(
-                    "Source {} has {} speaking.",
-                    data.ssrc,
-                    if data.speaking { "started" } else { "stopped" },
-                );
+                // println!(
+                //     "Source {} has {} speaking.",
+                //     data.ssrc,
+                //     if data.speaking { "started" } else { "stopped" },
+                // );
+                // not speaking
+                if !data.speaking {
+                    {
+                        // // User stopped speaking. start a timer
+                        // let mut a = self.user_status.lock().await;
+                        // if let Some(user_status) = a.get_mut(&data.ssrc) {
+                        //     user_status.speaking = false;
+                        //     // reset
+                        //     user_status.start = std::time::Instant::now();
+                        //     // reset
+                        //     user_status.time_passed = 0.0;
+                        //     println!("reset");
+                        // } else {
+                        //     println!("no user status NOT speaking");
+                        // }
+                    }
+                } else {
+                    {
+                        // User started speaking again. Time how long user WASN'T speaking
+                        let mut a = self.user_status.lock().await;
+                        if let Some(user_status) = a.get_mut(&data.ssrc) {
+                            user_status.speaking = true;
+                            // Time elapsed since we started timeing it above
+                            user_status.time_passed = user_status.start.elapsed().as_secs_f64();
+
+                            println!("time passed not speaking: {}", user_status.time_passed);
+                        } else {
+                            println!("no user status speaking");
+                        }
+                    }
+                }
             }
             Ctx::VoicePacket(data) => {
                 let now = std::time::Instant::now();
-                // An event which fires for every received audio packet,
-                // containing the decoded data.
-                // if let Some(audio) = data.audio {
-                //     {
-                //         if let Some(audio) = self.buffer.lock().await.get(&data.packet.ssrc) {
-                //             let slice_i16 = audio;
-                //             let mut result: Vec<u8> = Vec::new();
-                //             for &n in slice_i16 {
-                //                 // TODO: Use buffer
-                //                 let _ = result.write_i16_le(n).await;
-                //             }
-
-                //             // file.write_all(&*result).expect("cannot write to file");
-                //             // {
-                //             //     let _x = audio;
-                //             // };
-
-                //             // self.buffer
-                //             //     .lock()
-                //             //     .await
-                //             //     .get_mut(&data.ssrc)
-                //             //     .unwrap()
-                //             //     .clear();
-                //         }
-                //         // if let Some(buffer) = self.buffer.lock().await.get_mut(&data.packet.ssrc) {
-                //         //     buffer.extend(audio);
-                //         // };
-                //     }
-
-                //     // println!(
-                //     //     "Audio packet's first 5 samples: {:?}",
-                //     //     audio.get(..5.min(audio.len()))
-                //     // );
-                //     // println!(
-                //     //     "Audio packet sequence {:05} has {:04} bytes (decompressed from {}), SSRC {}",
-                //     //     data.packet.sequence.0,
-                //     //     audio.len() * std::mem::size_of::<i16>(),
-                //     //     data.packet.payload.len(),
-                //     //     data.packet.ssrc,
-                //     // );
-                // } else {
-                //     println!("RTP packet, but no audio. Driver may not be configured to decode.");
-                // }
 
                 if let Some(child) = self
                     .ssrc_ffmpeg_hashmap
@@ -231,19 +252,41 @@ impl VoiceEventHandler for Receiver {
                             // TODO: Use buffer
                             let _ = result.write_i16_le(n).await;
                         }
-                        // file.write_all(&*result).expect("cannot write to file");
 
                         if let Some(stdin) = child.stdin.as_mut() {
-                            let _ = stdin.write_all(&*result);
+                            if let Some(status) =
+                                self.user_status.lock().await.get_mut(&data.packet.ssrc)
                             {
+                                // floating point errors
+                                if status.time_passed > 0.05 {
+                                    println!("from mute");
+                                    let to_write = (status.time_passed * DISCORD_SAMPLE_RATE as f64)
+                                        .round()
+                                        as u64;
+                                    let mut vec = vec![0u8; to_write as usize];
+                                    for _ in 0..to_write {
+                                        vec.push(0u8);
+                                    }
+                                    match stdin.write_all(&*vec).await {
+                                        Ok(_) => {}
+                                        Err(err) => {
+                                            println!("Could not write to stdin: {}", err)
+                                        }
+                                    };
 
-                                // self.buffer
-                                //     .lock()
-                                //     .await
-                                //     .get_mut(&data.ssrc)
-                                //     .unwrap()
-                                //     .clear();
+                                    status.speaking = false;
+                                    status.start = std::time::Instant::now();
+                                    status.time_passed = 0.0;
+                                }
                             }
+                            match stdin.write_all(&*result).await {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    println!("Could not write to stdin: {}", err)
+                                }
+                            };
+                        } else {
+                            println!("no stdin");
                         }
                     } else {
                         println!("No audio");
@@ -265,6 +308,74 @@ impl VoiceEventHandler for Receiver {
                 user_id,
                 ..
             }) => {
+                println!("Someone connected {}", user_id);
+                let a = self
+                    .ctx_main
+                    .cache
+                    .member(self.guild_id, user_id.0)
+                    .await
+                    .unwrap();
+                if a.user.bot {
+                    println!("bot connected");
+                } else {
+                    {
+                        self.ssrc_hashmap
+                            .lock()
+                            .await
+                            .insert(*audio_ssrc, Some(user_id.0));
+                    }
+
+                    {
+                        self.user_id_hashmap
+                            .lock()
+                            .await
+                            .insert(user_id.0, *audio_ssrc);
+                    }
+                    println!("user inserted");
+                    {
+                        self.user_status.lock().await.insert(
+                            *audio_ssrc,
+                            UserStatus::new(user_id.0, std::time::Instant::now(), false),
+                        );
+                    }
+                    {
+                        if self
+                            .ssrc_ffmpeg_hashmap
+                            .lock()
+                            .await
+                            .get(audio_ssrc)
+                            .is_some()
+                        {
+                            // we have already spawned an ffmpeg process
+                        } else {
+                            // Create a process
+                            let path = create_path(*audio_ssrc, self.guild_id, user_id.0).await;
+
+                            let command = Command::new("ffmpeg")
+                                .args(["-channel_layout", "stereo"])
+                                .args(["-ac", "2"]) // channel count
+                                .args(["-ar", "48000"]) // sample rate
+                                .args(["-f", "s16le"]) // input type
+                                .args(["-i", "-"]) // Input name ("-" is pipe)
+                                .args(["-bufsize", "64k"])
+                                .args(["-b:a", "64k"]) // bitrate
+                                .arg(format!("{}.ogg", path)) // output
+                                .stdin(std::process::Stdio::piped())
+                                // .stderr(std::process::Stdio::piped())
+                                .stdout(std::process::Stdio::piped())
+                                .spawn();
+
+                            let child = command.unwrap();
+                            self.ssrc_ffmpeg_hashmap
+                                .lock()
+                                .await
+                                .insert(*audio_ssrc, child);
+
+                            println!("file created for ssrc: {}", *audio_ssrc);
+                        }
+                    }
+                }
+
                 // You can implement your own logic here to handle a user who has joined the
                 // voice channel e.g., allocate structures, map their SSRC to User ID.
 
@@ -279,20 +390,32 @@ impl VoiceEventHandler for Receiver {
                 // You will typically need to map the User ID to their SSRC; observed when
                 // speaking or connecting.
                 {
-                    // let ssrc = self
-                    //     .user_id_hashmap
-                    //     .lock()
-                    //     .await
-                    //     .remove(&user_id.0)
-                    //     .unwrap();
-                    // let a = self.ssrc_ffmpeg_hashmap.lock().await.remove(&ssrc).unwrap();
+                    let status = self
+                        .user_status
+                        .lock()
+                        .await
+                        .remove(self.user_id_hashmap.lock().await.get(&user_id.0).unwrap())
+                        .unwrap();
+                    let time = status.start2.elapsed().as_secs_f64();
+                    println!("time in channel: {}", time);
+                }
 
-                    // let output = a.wait_with_output().unwrap();
-                    // // TODO: Remove
-                    // println!("stdout {}", String::from_utf8(output.stdout).unwrap());
+                {
+                    let ssrc = match self.user_id_hashmap.lock().await.remove(&user_id.0) {
+                        Some(ok) => ok,
+                        None => {
+                            println!("tried to remove bot");
+                            return None;
+                        }
+                    };
+                    let a = self.ssrc_ffmpeg_hashmap.lock().await.remove(&ssrc).unwrap();
+
+                    let output = a.wait_with_output().await.unwrap();
+                    // TODO: Remove
+                    println!("stdout {}", String::from_utf8(output.stdout).unwrap());
                     // println!("stderr {}", String::from_utf8(output.stderr).unwrap());
-                    // //
-                    // println!("Client disconnected: user {:?}", user_id);
+                    //
+                    println!("Client disconnected: user {:?}", user_id);
                 }
             }
             _ => {
