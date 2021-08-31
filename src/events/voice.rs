@@ -27,8 +27,6 @@ struct Receiver {
     ssrc_hashmap: Arc<Mutex<HashMap<u32, Option<u64>>>>,
     user_id_hashmap: Arc<Mutex<HashMap<u64, u32>>>,
     ssrc_ffmpeg_hashmap: Arc<Mutex<HashMap<u32, Child>>>,
-    // Each ssrc needs to have it's own buffer
-    buffer: Arc<Mutex<HashMap<u32, Vec<i16>>>>,
     now: Arc<Mutex<HashMap<u32, std::time::Instant>>>,
     guild_id: GuildId,
     user_status: Arc<Mutex<HashMap<u32, UserStatus>>>,
@@ -43,7 +41,6 @@ impl Receiver {
             ssrc_hashmap: Arc::new(Mutex::new(HashMap::new())),
             user_id_hashmap: Arc::new(Mutex::new(HashMap::new())),
             ssrc_ffmpeg_hashmap: Arc::new(Mutex::new(HashMap::new())),
-            buffer: Arc::new(Mutex::new(HashMap::new())),
             now: Arc::new(Mutex::new(HashMap::new())),
             guild_id,
             user_status: Arc::new(Mutex::new(HashMap::new())),
@@ -55,9 +52,8 @@ struct UserStatus {
     user_id: u64,
     start: std::time::Instant,
     speaking: bool,
-    time_passed: f64,
+    time_passed: u128,
     start2: std::time::Instant,
-    time_passed2: f64,
 }
 
 impl UserStatus {
@@ -66,9 +62,8 @@ impl UserStatus {
             user_id,
             start,
             speaking: muted,
-            time_passed: 0.0,
+            time_passed: 0,
             start2: std::time::Instant::now(),
-            time_passed2: 0.0,
         }
     }
 }
@@ -101,14 +96,14 @@ impl VoiceEventHandler for Receiver {
                     user_id, ssrc, speaking,
                 );
 
-                let a = self
+                let member = self
                     .ctx_main
                     .cache
                     .member(self.guild_id, user_id.unwrap().0)
                     .await
                     .unwrap();
 
-                if a.user.bot {
+                if member.user.bot {
                     println!("is a bot");
                     // Don't record bots
                     {
@@ -143,7 +138,8 @@ impl VoiceEventHandler for Receiver {
                             // we have already spawned an ffmpeg process
                         } else {
                             // Create a process
-                            let path = create_path(*ssrc, self.guild_id, user_id.unwrap().0).await;
+                            let path =
+                                create_path(*ssrc, self.guild_id, user_id.unwrap().0, member).await;
 
                             let command = Command::new("ffmpeg")
                                 .args(["-channel_layout", "stereo"])
@@ -164,46 +160,20 @@ impl VoiceEventHandler for Receiver {
                             println!("file created for ssrc: {}", *ssrc);
                         }
                     }
-                    {
-                        // add a buffer for user
-                        self.buffer.lock().await.insert(*ssrc, Vec::new());
-                    }
                 }
             }
             Ctx::SpeakingUpdate(data) => {
-                // {
-                //     if !data.speaking {
-                //         if let Some(mut file) = self.ssrc_file_hashmap.lock().await.get(&data.ssrc)
-                //         {
-                //             if let Some(audio) = self.buffer.lock().await.get(&data.ssrc) {
-
-                //                 // file.write_all(&*result).expect("cannot write to file");
-                //                 // {
-                //                 //     let _x = audio;
-                //                 // };
-
-                //                 // self.buffer
-                //                 //     .lock()
-                //                 //     .await
-                //                 //     .get_mut(&data.ssrc)
-                //                 //     .unwrap()
-                //                 //     .clear();
-                //             }
-                //         } else {
-                //         }
-                //     }
-                // }
                 // You can implement logic here which reacts to a user starting
                 // or stopping speaking.
 
                 // TODO: When user is silence add 0's to the file
                 // 1) Count how long the user wasn't speaking. Add the equivalent ammount on the next packet update
                 // 2) While the user is set as stopped contiously add 0's (much harder?)
-                // println!(
-                //     "Source {} has {} speaking.",
-                //     data.ssrc,
-                //     if data.speaking { "started" } else { "stopped" },
-                // );
+                println!(
+                    "Source {} has {} speaking.",
+                    data.ssrc,
+                    if data.speaking { "started" } else { "stopped" },
+                );
                 // not speaking
                 if !data.speaking {
                     {
@@ -220,21 +190,25 @@ impl VoiceEventHandler for Receiver {
                         //     println!("no user status NOT speaking");
                         // }
                     }
-                } else {
-                    {
-                        // User started speaking again. Time how long user WASN'T speaking
-                        let mut a = self.user_status.lock().await;
-                        if let Some(user_status) = a.get_mut(&data.ssrc) {
-                            user_status.speaking = true;
-                            // Time elapsed since we started timeing it above
-                            user_status.time_passed = user_status.start.elapsed().as_secs_f64();
-
-                            println!("time passed not speaking: {}", user_status.time_passed);
-                        } else {
-                            println!("no user status speaking");
-                        }
-                    }
                 }
+                // else {
+                //     {
+                //         // User started speaking again. Time how long user WASN'T speaking
+                //         // let mut user_status = self.user_status.lock().await;
+                //         // if let Some(user_status) = user_status.get_mut(&data.ssrc) {
+                //         //     user_status.speaking = true;
+                //         //     // Time elapsed since we started timeing it above
+                //         //     user_status.time_passed = user_status.start.elapsed().as_millis();
+
+                //         //     println!(
+                //         //         "time passed not speaking in millis: {}",
+                //         //         user_status.time_passed
+                //         //     );
+                //         // } else {
+                //         //     // println!("no user status speaking");
+                //         // }
+                //     }
+                // }
             }
             Ctx::VoicePacket(data) => {
                 let now = std::time::Instant::now();
@@ -245,40 +219,75 @@ impl VoiceEventHandler for Receiver {
                     .await
                     .get_mut(&data.packet.ssrc)
                 {
-                    if let Some(audio) = data.audio {
-                        let slice_i16 = audio;
-                        let mut result: Vec<u8> = Vec::new();
-                        for &n in slice_i16 {
-                            // TODO: Use buffer
-                            let _ = result.write_i16_le(n).await;
-                        }
+                    if let Some(audio_i16) = data.audio {
+                        // let mut consecutive = 0u32;
+                        // println!(
+                        //     "Audio packet's first 5 samples: {:?}",
+                        //     // audio.get(..5.min(audio.len()))
+                        //     audio
+                        // );
 
+                        // println!(
+                        // 	"Audio packet sequence {:05} has {:04} bytes (decompressed from {}), SSRC {}",
+                        // 	data.packet.sequence.0,
+                        // 	audio.len() * std::mem::size_of::<i16>(),
+                        // 	data.packet.payload.len(),
+                        // 	data.packet.ssrc,
+                        // );
                         if let Some(stdin) = child.stdin.as_mut() {
-                            if let Some(status) =
-                                self.user_status.lock().await.get_mut(&data.packet.ssrc)
-                            {
-                                // floating point errors
-                                if status.time_passed > 0.05 {
-                                    println!("from mute");
-                                    let to_write = (status.time_passed * DISCORD_SAMPLE_RATE as f64)
-                                        .round()
-                                        as u64;
-                                    let mut vec = vec![0u8; to_write as usize];
-                                    for _ in 0..to_write {
-                                        vec.push(0u8);
-                                    }
-                                    match stdin.write_all(&*vec).await {
-                                        Ok(_) => {}
-                                        Err(err) => {
-                                            println!("Could not write to stdin: {}", err)
-                                        }
-                                    };
+                            // if let Some(status) =
+                            //     self.user_status.lock().await.get_mut(&data.packet.ssrc)
+                            // {
+                            //     if status.time_passed > 0 {
+                            //         println!("from mute");
+                            //         // the size is double because ffmpeg expects i16
+                            //         let to_write = {
+                            //             let mut value = status.time_passed
+                            //                 * (DISCORD_SAMPLE_RATE / 1000) as u128
+                            //                 * 2; // Silence to write from the time not speaking
 
-                                    status.speaking = false;
-                                    status.start = std::time::Instant::now();
-                                    status.time_passed = 0.0;
-                                }
+                            //             // we need even amount of bytes
+                            //             if (value % 2) == 1 {
+                            //                 value += 1;
+                            //             }
+
+                            //             value
+                            //         };
+
+                            //         println!("to_write: {}", to_write);
+                            //         // From rough observation discord sends an addiitonal ~9.5 packets of silence
+                            //         // Since we write u8 we need twice as many
+
+                            //         let vec: Vec<u8> = vec![0u8; to_write as usize];
+                            //         match stdin.write_all(&*vec).await {
+                            //             Ok(_) => {}
+                            //             Err(err) => {
+                            //                 println!("Could not write to stdin: {}", err)
+                            //             }
+                            //         };
+                            //         println!("HERE: {}", now.elapsed().as_micros());
+                            //         status.speaking = false;
+                            //         status.start = std::time::Instant::now();
+                            //         status.time_passed = 0;
+                            //         // When the user stops speaking we receive at least 6(?) packets of silence. Ignroe them
+                            //         return None;
+                            //     }
+                            // }
+                            let mut result: Vec<u8> = Vec::new();
+                            for &n in audio_i16 {
+                                // TODO: Use buffer
+                                let _ = result.write_i16_le(n).await;
+
+                                // if n == 0 {
+                                //     consecutive += 1;
+                                // }
                             }
+
+                            // If more than half of the samples are silence don't write that packet.
+                            // if consecutive > 1000 {
+                            //     return None;
+                            // }
+
                             match stdin.write_all(&*result).await {
                                 Ok(_) => {}
                                 Err(err) => {
@@ -295,7 +304,7 @@ impl VoiceEventHandler for Receiver {
                     println!("No handle for ffmpeg. Maybe a bot?")
                 }
 
-                println!("Messsage time elapsed micro:{}", now.elapsed().as_micros());
+                // println!("Messsage time elapsed micro:{}", now.elapsed().as_micros());
             }
             Ctx::RtcpPacket(data) => {
                 // An event which fires for every received rtcp packet,
@@ -309,13 +318,13 @@ impl VoiceEventHandler for Receiver {
                 ..
             }) => {
                 println!("Someone connected {}", user_id);
-                let a = self
+                let member = self
                     .ctx_main
                     .cache
                     .member(self.guild_id, user_id.0)
                     .await
                     .unwrap();
-                if a.user.bot {
+                if member.user.bot {
                     println!("bot connected");
                 } else {
                     {
@@ -349,7 +358,8 @@ impl VoiceEventHandler for Receiver {
                             // we have already spawned an ffmpeg process
                         } else {
                             // Create a process
-                            let path = create_path(*audio_ssrc, self.guild_id, user_id.0).await;
+                            let path =
+                                create_path(*audio_ssrc, self.guild_id, user_id.0, member).await;
 
                             let command = Command::new("ffmpeg")
                                 .args(["-channel_layout", "stereo"])
@@ -389,6 +399,25 @@ impl VoiceEventHandler for Receiver {
                 // voice channel e.g., finalise processing of statistics etc.
                 // You will typically need to map the User ID to their SSRC; observed when
                 // speaking or connecting.
+
+                {
+                    // Bots
+                    let a = self.user_id_hashmap.lock().await;
+                    if let Some(ab) = a.get(&user_id.0) {
+                        let b = self.ssrc_hashmap.lock().await;
+                        if let Some(ba) = b.get(ab) {
+                            if ba.is_none() {
+                                // bot ignore
+                                return None;
+                            }
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        return None;
+                    }
+                }
+
                 {
                     let status = self
                         .user_status
@@ -429,7 +458,12 @@ impl VoiceEventHandler for Receiver {
 }
 
 // TODO: username instead of id
-async fn create_path(ssrc: u32, guild_id: GuildId, user_id: u64) -> String {
+async fn create_path(
+    ssrc: u32,
+    guild_id: GuildId,
+    user_id: u64,
+    member: serenity::model::guild::Member,
+) -> String {
     let start = std::time::SystemTime::now();
     let since_the_epoch = start
         .duration_since(std::time::UNIX_EPOCH)
@@ -445,8 +479,17 @@ async fn create_path(ssrc: u32, guild_id: GuildId, user_id: u64) -> String {
 
     let dir_path = format!("{}/{}/{}/{}", &RECORDING_FILE_PATH, guild_id.0, year, month);
     let combined_path = format!(
-        "{}/{}/{}/{}/{}-{}-{}-{}-{}",
-        &RECORDING_FILE_PATH, guild_id.0, year, month, day_name, day_number, hour, minute, user_id,
+        "{}/{}/{}/{}/{}-{}-{}-{}-{}-{}",
+        &RECORDING_FILE_PATH,
+        guild_id.0,
+        year,
+        month,
+        day_name,
+        day_number,
+        hour,
+        minute,
+        user_id,
+        member.user.name
     );
 
     combined_path
@@ -500,13 +543,11 @@ pub async fn voice_state_update(
     let mut highest_channel_len: usize = 0;
 
     for (channel_id, guild_channel) in all_channels {
-        if guild_channel.kind == serenity::model::channel::ChannelType::Voice {
-            if highest_channel_len > guild_channel.members(&ctx).await.expect("cannot get").len() {
-                // do nothing
-            } else {
-                highest_channel_len = guild_channel.members(&ctx).await.expect("cannot get").len();
-                highest_channel_id = guild_channel.id;
-            }
+        if guild_channel.kind == serenity::model::channel::ChannelType::Voice
+            && guild_channel.members(&ctx).await.expect("cannot get").len() > highest_channel_len
+        {
+            highest_channel_len = guild_channel.members(&ctx).await.expect("cannot get").len();
+            highest_channel_id = guild_channel.id;
         }
     }
 
@@ -569,7 +610,6 @@ pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_
     //         }
     //     }
     // }
-
     let (handler_lock, conn_result) = manager.join(guild_id, channel_id).await;
 
     match conn_result {
