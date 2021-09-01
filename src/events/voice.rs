@@ -49,21 +49,21 @@ impl Receiver {
 }
 
 struct UserStatus {
-    user_id: u64,
-    start: std::time::Instant,
-    speaking: bool,
-    time_passed: u128,
-    start2: std::time::Instant,
+    // user_id: u64,
+// start: std::time::Instant,
+// speaking: bool,
+// time_passed: u128,
+// start2: std::time::Instant,
 }
 
 impl UserStatus {
     fn new(user_id: u64, start: std::time::Instant, muted: bool) -> Self {
         Self {
-            user_id,
-            start,
-            speaking: muted,
-            time_passed: 0,
-            start2: std::time::Instant::now(),
+            // user_id,
+            // start,
+            // speaking: muted,
+            // time_passed: 0,
+            // start2: std::time::Instant::now(),
         }
     }
 }
@@ -141,20 +141,7 @@ impl VoiceEventHandler for Receiver {
                             let path =
                                 create_path(*ssrc, self.guild_id, user_id.unwrap().0, member).await;
 
-                            let command = Command::new("ffmpeg")
-                                .args(["-channel_layout", "stereo"])
-                                .args(["-ac", "2"]) // channel count
-                                .args(["-ar", "48000"]) // sample rate
-                                .args(["-f", "s16le"]) // input type
-                                .args(["-i", "-"]) // Input name ("-" is pipe)
-                                .args(["-b:a", "64k"]) // bitrate
-                                .arg(format!("{}.ogg", path)) // output
-                                .stdin(std::process::Stdio::piped())
-                                .stderr(std::process::Stdio::null())
-                                .stdout(std::process::Stdio::null())
-                                .spawn();
-
-                            let child = command.unwrap();
+                            let child = spawn_ffmpeg(&path);
                             self.ssrc_ffmpeg_hashmap.lock().await.insert(*ssrc, child);
 
                             println!("file created for ssrc: {}", *ssrc);
@@ -169,11 +156,11 @@ impl VoiceEventHandler for Receiver {
                 // TODO: When user is silence add 0's to the file
                 // 1) Count how long the user wasn't speaking. Add the equivalent ammount on the next packet update
                 // 2) While the user is set as stopped contiously add 0's (much harder?)
-                println!(
-                    "Source {} has {} speaking.",
-                    data.ssrc,
-                    if data.speaking { "started" } else { "stopped" },
-                );
+                // println!(
+                //     "Source {} has {} speaking.",
+                //     data.ssrc,
+                //     if data.speaking { "started" } else { "stopped" },
+                // );
                 // not speaking
                 if !data.speaking {
                     {
@@ -301,7 +288,6 @@ impl VoiceEventHandler for Receiver {
                         println!("No audio");
                     }
                 } else {
-                    println!("No handle for ffmpeg. Maybe a bot?")
                 }
 
                 // println!("Messsage time elapsed micro:{}", now.elapsed().as_micros());
@@ -361,21 +347,7 @@ impl VoiceEventHandler for Receiver {
                             let path =
                                 create_path(*audio_ssrc, self.guild_id, user_id.0, member).await;
 
-                            let command = Command::new("ffmpeg")
-                                .args(["-channel_layout", "stereo"])
-                                .args(["-ac", "2"]) // channel count
-                                .args(["-ar", "48000"]) // sample rate
-                                .args(["-f", "s16le"]) // input type
-                                .args(["-i", "-"]) // Input name ("-" is pipe)
-                                .args(["-bufsize", "64k"])
-                                .args(["-b:a", "64k"]) // bitrate
-                                .arg(format!("{}.ogg", path)) // output
-                                .stdin(std::process::Stdio::piped())
-                                // .stderr(std::process::Stdio::piped())
-                                .stdout(std::process::Stdio::piped())
-                                .spawn();
-
-                            let child = command.unwrap();
+                            let child = spawn_ffmpeg(&path);
                             self.ssrc_ffmpeg_hashmap
                                 .lock()
                                 .await
@@ -419,14 +391,12 @@ impl VoiceEventHandler for Receiver {
                 }
 
                 {
-                    let status = self
+                    let _ = self
                         .user_status
                         .lock()
                         .await
                         .remove(self.user_id_hashmap.lock().await.get(&user_id.0).unwrap())
                         .unwrap();
-                    let time = status.start2.elapsed().as_secs_f64();
-                    println!("time in channel: {}", time);
                 }
 
                 {
@@ -441,7 +411,14 @@ impl VoiceEventHandler for Receiver {
 
                     let output = a.wait_with_output().await.unwrap();
                     // TODO: Remove
-                    println!("stdout {}", String::from_utf8(output.stdout).unwrap());
+                    println!(
+                        "stdout from wait_with_output {}",
+                        String::from_utf8(output.stdout).unwrap()
+                    );
+                    println!(
+                        "stderr from wait_with_output {}",
+                        String::from_utf8(output.stderr).unwrap()
+                    );
                     // println!("stderr {}", String::from_utf8(output.stderr).unwrap());
                     //
                     println!("Client disconnected: user {:?}", user_id);
@@ -455,6 +432,24 @@ impl VoiceEventHandler for Receiver {
 
         None
     }
+}
+
+fn spawn_ffmpeg(path: &str) -> Child {
+    let command = Command::new("ffmpeg")
+        .args(["-channel_layout", "stereo"])
+        .args(["-ac", "2"]) // channel count
+        .args(["-ar", "48000"]) // sample rate
+        .args(["-f", "s16le"]) // input type
+        .args(["-i", "-"]) // Input name ("-" is pipe)
+        .args(["-bufsize", "64k"])
+        .args(["-b:a", "64k"]) // bitrate
+        .arg(format!("{}.ogg", path)) // output
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn();
+
+    command.unwrap()
 }
 
 // TODO: username instead of id
@@ -476,10 +471,14 @@ async fn create_path(
     let day_name = format!("{}", now.format("%A"));
     let hour = format!("{}", now.format("%H"));
     let minute = format!("{}", now.format("%M"));
+    let seconds = format!("{}", now.format("%S"));
 
-    let dir_path = format!("{}/{}/{}/{}", &RECORDING_FILE_PATH, guild_id.0, year, month);
+    let dir_path = format!(
+        "{}/{}/{}/{}/",
+        &RECORDING_FILE_PATH, guild_id.0, year, month
+    );
     let combined_path = format!(
-        "{}/{}/{}/{}/{}-{}-{}-{}-{}-{}",
+        "{}/{}/{}/{}/{}-{}-{}-{}-{}-{}-{}",
         &RECORDING_FILE_PATH,
         guild_id.0,
         year,
@@ -488,9 +487,19 @@ async fn create_path(
         day_number,
         hour,
         minute,
+        seconds,
         user_id,
         member.user.name
     );
+
+    // Try to create the dir in case it does not exist
+    // Delete the
+    match std::fs::create_dir_all(dir_path) {
+        Ok(_) => {}
+        Err(err) => {
+            panic!("cannot create path: {}", err);
+        }
+    };
 
     combined_path
 }
@@ -520,6 +529,15 @@ pub async fn voice_state_update(
         return;
     }
 
+    if let Some(old) = old_state {
+        if new_state.channel_id.unwrap() == old.channel_id.unwrap() {
+            // An action happened that was NOT switching channels.
+            // We don't care about those
+
+            return;
+        }
+    }
+
     let channel = new_state
         .channel_id
         .unwrap()
@@ -544,12 +562,15 @@ pub async fn voice_state_update(
 
     for (channel_id, guild_channel) in all_channels {
         if guild_channel.kind == serenity::model::channel::ChannelType::Voice
-            && guild_channel.members(&ctx).await.expect("cannot get").len() > highest_channel_len
+            && guild_channel.members(&ctx).await.expect("cannot get").len() >= highest_channel_len
         {
             highest_channel_len = guild_channel.members(&ctx).await.expect("cannot get").len();
             highest_channel_id = guild_channel.id;
         }
     }
+
+    println!("highest channel id: {}", highest_channel_id);
+    println!("highest channel len: {}", highest_channel_len);
 
     if highest_channel_len > 0 {
         connect_to_voice_channel(&ctx, guild_id.unwrap(), highest_channel_id).await;
@@ -581,23 +602,6 @@ pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_
         .expect("Songbird Voice client placed in at initialisation.")
         .clone();
 
-    {
-        if let Some(result) = manager.get(guild_id) {
-            if let Some(channel) = result.lock().await.current_channel() {
-                println!(
-                    "manager channel {}",
-                    result.lock().await.current_channel().unwrap()
-                );
-            } else {
-                println!("no channel joined");
-            }
-        } else {
-            println!("manager not present??");
-        }
-
-        println!("our channel {}", channel_id);
-    }
-
     // Don't connect to a channel we are already in
     // TODO: will have to re-register all the event handler + songbird might already be doing this for us
     // {
@@ -618,6 +622,9 @@ pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_
 
             // NOTE: this skips listening for the actual connection result.
             let mut handler = handler_lock.lock().await;
+            // Remove any old events in case the bot swaps channels
+            handler.remove_all_global_events();
+
             let ctx1 = Arc::new(ctx.clone());
             let receiver = Receiver::new(ctx1, guild_id).await;
 
