@@ -519,6 +519,27 @@ pub async fn voice_state_update(
     if new_state.channel_id.is_none() {
         // Someone left the channel
         // TODO: Logic to stop recording if < x people
+
+        if let Some(channel) = old_state.unwrap().channel_id {
+            if channel
+                .to_channel_cached(&ctx)
+                .await
+                .unwrap()
+                .guild()
+                .unwrap()
+                .members(&ctx)
+                .await
+                .unwrap()
+                .len()
+                == 1
+            // just the bot is left
+            // TODO: fix that atrocity ^
+            // TODO: Other bots might be present in the channel. Don't count bots
+            {
+                leave_voice_channel(&ctx, guild_id.unwrap()).await;
+            }
+        }
+
         println!("is_none");
         return;
     }
@@ -537,13 +558,6 @@ pub async fn voice_state_update(
             return;
         }
     }
-
-    let channel = new_state
-        .channel_id
-        .unwrap()
-        .to_channel_cached(&ctx)
-        .await
-        .unwrap();
 
     // The bot will join a voice channel with the following priorities
     // 1) There must be at least 3 people in a channel
@@ -594,6 +608,17 @@ pub async fn voice_state_update(
     // } else {
     //     // user leaves a voice channel
     // }
+}
+
+async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
+    let manager = songbird::get(ctx)
+        .await
+        .expect("Songbird Voice client placed in at initialisation.")
+        .clone();
+
+    let _ = manager.remove(guild_id).await;
+
+    println!("Left the voice channel");
 }
 
 pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_id: ChannelId) {
