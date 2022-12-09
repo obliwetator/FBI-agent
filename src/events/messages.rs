@@ -4,6 +4,7 @@ use serenity::{
     client::Context,
     model::channel::{Message, MessageType},
 };
+use tracing::info;
 
 pub async fn message(ctx: Context, msg: Message) {
     // let pool = db_helper::get_pool_from_ctx(&ctx).await;
@@ -12,7 +13,7 @@ pub async fn message(ctx: Context, msg: Message) {
     let now = Instant::now();
     // println!("message is {}", msg.content);
     match msg.kind {
-        MessageType::ApplicationCommand => {}
+        MessageType::Regular => {}
         MessageType::ChannelFollowAdd => {}
         MessageType::GroupCallCreation => {}
         MessageType::GroupIconUpdate => {}
@@ -29,7 +30,15 @@ pub async fn message(ctx: Context, msg: Message) {
         MessageType::NitroTier2 => {}
         MessageType::NitroTier3 => {}
         MessageType::PinsAdd => {}
-        MessageType::Regular => {}
+        MessageType::GuildDiscoveryGracePeriodInitialWarning => todo!(),
+        MessageType::GuildDiscoveryGracePeriodFinalWarning => todo!(),
+        MessageType::ThreadCreated => todo!(),
+        MessageType::ChatInputCommand => {
+            info!("slash command message: {:#?}", msg);
+        }
+        MessageType::ThreadStarterMessage => todo!(),
+        MessageType::ContextMenuCommand => todo!(),
+        MessageType::AutoModerationAction => todo!(),
         MessageType::Unknown => {}
         _ => {
             println!("unkown type");

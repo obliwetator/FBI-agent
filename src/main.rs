@@ -4,23 +4,59 @@ use std::collections::HashMap;
 
 use serenity::{
     async_trait,
-    client::bridge::gateway::GatewayIntents,
-    model::{channel::Message, gateway::Ready},
+    model::{
+        channel::Message,
+        gateway::Ready,
+        prelude::{
+            automod::{ActionExecution, Rule},
+            GuildChannel, GuildId, GuildScheduledEventUserAddEvent,
+            GuildScheduledEventUserRemoveEvent, PartialGuildChannel, ScheduledEvent, StageInstance,
+            StickerId, ThreadListSyncEvent, ThreadMember, ThreadMembersUpdateEvent,
+        },
+        sticker::Sticker,
+    },
     prelude::*,
     Result as SerenityResult,
 };
 use songbird::{driver::DecodeMode, Config, SerenityInit};
+use tracing::{info, Level};
+use tracing_subscriber::FmtSubscriber;
 
+pub mod commands;
 pub mod config;
-pub mod database;
 pub mod events;
-pub mod features;
-pub mod helpers;
 
 struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
+    async fn application_command_permissions_update(
+        &self,
+        _ctx: Context,
+        _permission: serenity::model::prelude::command::CommandPermission,
+    ) {
+    }
+
+    /// Dispatched when an auto moderation rule was created.
+    ///
+    /// Provides said rule's data.
+    async fn auto_moderation_rule_create(&self, _ctx: Context, _rule: Rule) {}
+
+    /// Dispatched when an auto moderation rule was updated.
+    ///
+    /// Provides said rule's data.
+    async fn auto_moderation_rule_update(&self, _ctx: Context, _rule: Rule) {}
+
+    /// Dispatched when an auto moderation rule was deleted.
+    ///
+    /// Provides said rule's data.
+    async fn auto_moderation_rule_delete(&self, _ctx: Context, _rule: Rule) {}
+
+    /// Dispatched when an auto moderation rule was triggered and an action was executed.
+    ///
+    /// Provides said action execution's data.
+    async fn auto_moderation_action_execution(&self, _ctx: Context, _execution: ActionExecution) {}
+
     async fn cache_ready(&self, ctx: Context, guilds: Vec<serenity::model::id::GuildId>) {
         // // Ensure we have the same guilds as we curently received
         // guilds::sync_guilds(&ctx, guilds).await;
@@ -114,7 +150,7 @@ impl EventHandler for Handler {
     async fn guild_delete(
         &self,
         _ctx: Context,
-        _incomplete: serenity::model::guild::GuildUnavailable,
+        _incomplete: serenity::model::guild::UnavailableGuild,
         _full: Option<serenity::model::guild::Guild>,
     ) {
         events::guilds::guild_delete(_ctx, _incomplete, _full).await;
@@ -143,10 +179,9 @@ impl EventHandler for Handler {
     async fn guild_member_addition(
         &self,
         _ctx: Context,
-        _guild_id: serenity::model::id::GuildId,
         _new_member: serenity::model::guild::Member,
     ) {
-        events::guilds::guild_member_addition(_ctx, _guild_id, _new_member).await;
+        events::guilds::guild_member_addition(_ctx, _new_member).await;
     }
 
     async fn guild_member_removal(
@@ -177,13 +212,8 @@ impl EventHandler for Handler {
         events::guilds::guild_members_chunk(_ctx, _chunk).await;
     }
 
-    async fn guild_role_create(
-        &self,
-        _ctx: Context,
-        _guild_id: serenity::model::id::GuildId,
-        _new: serenity::model::guild::Role,
-    ) {
-        events::roles::guild_role_create(_ctx, _guild_id, _new).await;
+    async fn guild_role_create(&self, _ctx: Context, _new: serenity::model::guild::Role) {
+        events::roles::guild_role_create(_ctx, _new).await;
     }
 
     async fn guild_role_delete(
@@ -205,11 +235,21 @@ impl EventHandler for Handler {
     async fn guild_role_update(
         &self,
         _ctx: Context,
-        _guild_id: serenity::model::id::GuildId,
         _old_data_if_available: Option<serenity::model::guild::Role>,
         _new: serenity::model::guild::Role,
     ) {
-        events::roles::guild_role_update(_ctx, _guild_id, _old_data_if_available, _new).await;
+        events::roles::guild_role_update(_ctx, _old_data_if_available, _new).await;
+    }
+
+    /// Dispatched when the stickers are updated.
+    ///
+    /// Provides the guild's id and the new state of the stickers in the guild.
+    async fn guild_stickers_update(
+        &self,
+        _ctx: Context,
+        _guild_id: GuildId,
+        _current_state: HashMap<StickerId, Sticker>,
+    ) {
     }
 
     async fn guild_unavailable(&self, _ctx: Context, _guild_id: serenity::model::id::GuildId) {}
@@ -244,7 +284,6 @@ impl EventHandler for Handler {
     ) {
         events::messages::message_delete(_ctx, _channel_id, _deleted_message_id, _guild_id).await;
     }
-
     async fn message_delete_bulk(
         &self,
         _ctx: Context,
@@ -260,7 +299,6 @@ impl EventHandler for Handler {
         )
         .await;
     }
-
     async fn message_update(
         &self,
         _ctx: Context,
@@ -274,7 +312,6 @@ impl EventHandler for Handler {
     async fn reaction_add(&self, _ctx: Context, _add_reaction: serenity::model::channel::Reaction) {
         events::reactions::reaction_add(_ctx, _add_reaction).await;
     }
-
     async fn reaction_remove(
         &self,
         _ctx: Context,
@@ -282,7 +319,6 @@ impl EventHandler for Handler {
     ) {
         events::reactions::reaction_remove(_ctx, _removed_reaction).await;
     }
-
     async fn reaction_remove_all(
         &self,
         _ctx: Context,
@@ -294,19 +330,33 @@ impl EventHandler for Handler {
     // TODO
     async fn presence_replace(&self, _ctx: Context, _: Vec<serenity::model::prelude::Presence>) {}
     // TODO
-    async fn presence_update(
-        &self,
-        _ctx: Context,
-        _new_data: serenity::model::event::PresenceUpdateEvent,
-    ) {
-    }
-
+    async fn presence_update(&self, _ctx: Context, _new_data: serenity::model::prelude::Presence) {}
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
-        // println!("ready: {:#?}", ready.guilds);
+
+        let guild_id = GuildId(850192711649722368);
+
+        let commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
+            commands
+                .create_application_command(|command| {
+                    commands::play_clip_command::register(command)
+                })
+                .create_application_command(|command| commands::clip_it::register(command))
+        })
+        .await
+        .unwrap();
+
+        // serenity::model::prelude::command::Command::create_global_application_command(
+        //     &ctx.http,
+        //     |command| commands::play_clip_command::register(command),
+        // )
+        // .await
+        // .unwrap();
     }
+
     // TODO
     async fn resume(&self, _ctx: Context, _: serenity::model::event::ResumedEvent) {}
+
     // TODO
     async fn shard_stage_update(
         &self,
@@ -314,10 +364,13 @@ impl EventHandler for Handler {
         _: serenity::client::bridge::gateway::event::ShardStageUpdateEvent,
     ) {
     }
+
     // TODO
     async fn typing_start(&self, _ctx: Context, _: serenity::model::event::TypingStartEvent) {}
+
     // TODO
     async fn unknown(&self, _ctx: Context, _name: String, _raw: serde_json::Value) {}
+
     // TODO
     async fn user_update(
         &self,
@@ -339,11 +392,10 @@ impl EventHandler for Handler {
     async fn voice_state_update(
         &self,
         _ctx: Context,
-        _guild_id: Option<serenity::model::id::GuildId>,
         _old: Option<serenity::model::prelude::VoiceState>,
         _new: serenity::model::prelude::VoiceState,
     ) {
-        events::voice::voice_state_update(_ctx, _guild_id, _old, _new).await;
+        events::voice::voice_state_update(_ctx, _old, _new).await;
     }
 
     // TODO
@@ -358,7 +410,7 @@ impl EventHandler for Handler {
     async fn interaction_create(
         &self,
         _ctx: Context,
-        _interaction: serenity::model::interactions::Interaction,
+        _interaction: serenity::model::prelude::interaction::Interaction,
     ) {
         events::interactions::interaction_create(_ctx, _interaction).await;
     }
@@ -390,36 +442,103 @@ impl EventHandler for Handler {
             .await;
     }
 
-    async fn application_command_create(
+    /// Dispatched when a stage instance is created.
+    ///
+    /// Provides the created stage instance.
+    async fn stage_instance_create(&self, _ctx: Context, _stage_instance: StageInstance) {}
+
+    /// Dispatched when a stage instance is updated.
+    ///
+    /// Provides the updated stage instance.
+    async fn stage_instance_update(&self, _ctx: Context, _stage_instance: StageInstance) {}
+
+    /// Dispatched when a stage instance is deleted.
+    ///
+    /// Provides the deleted stage instance.
+    async fn stage_instance_delete(&self, _ctx: Context, _stage_instance: StageInstance) {}
+
+    /// Dispatched when a thread is created or the current user is added
+    /// to a private thread.
+    ///
+    /// Provides the thread.
+    async fn thread_create(&self, _ctx: Context, _thread: GuildChannel) {}
+
+    /// Dispatched when a thread is updated.
+    ///
+    /// Provides the updated thread.
+    async fn thread_update(&self, _ctx: Context, _thread: GuildChannel) {}
+
+    /// Dispatched when a thread is deleted.
+    ///
+    /// Provides the partial deleted thread.
+    async fn thread_delete(&self, _ctx: Context, _thread: PartialGuildChannel) {}
+
+    /// Dispatched when the current user gains access to a channel
+    ///
+    /// Provides the threads the current user can access, the thread members,
+    /// the guild Id, and the channel Ids of the parent channels being synced.
+    async fn thread_list_sync(&self, _ctx: Context, _thread_list_sync: ThreadListSyncEvent) {}
+
+    /// Dispatched when the [`ThreadMember`] for the current user is updated.
+    ///
+    /// Provides the updated thread member.
+    async fn thread_member_update(&self, _ctx: Context, _thread_member: ThreadMember) {}
+
+    /// Dispatched when anyone is added to or removed from a thread. If the current user does not have the [`GatewayIntents::GUILDS`],
+    /// then this event will only be sent if the current user was added to or removed from the thread.
+    ///
+    /// Provides the added/removed members, the approximate member count of members in the thread,
+    /// the thread Id and its guild Id.
+    ///
+    /// [`GatewayIntents::GUILDS`]: crate::model::gateway::GatewayIntents::GUILDS
+    async fn thread_members_update(
         &self,
         _ctx: Context,
-        _application_command: serenity::model::interactions::application_command::ApplicationCommand,
+        _thread_members_update: ThreadMembersUpdateEvent,
     ) {
-        events::interactions::application_command_create(_ctx, _application_command).await;
     }
 
-    async fn application_command_update(
+    /// Dispatched when a scheduled event is created.
+    ///
+    /// Provides data about the scheduled event.
+    async fn guild_scheduled_event_create(&self, _ctx: Context, _event: ScheduledEvent) {}
+
+    /// Dispatched when a scheduled event is updated.
+    ///
+    /// Provides data about the scheduled event.
+    async fn guild_scheduled_event_update(&self, _ctx: Context, _event: ScheduledEvent) {}
+
+    /// Dispatched when a scheduled event is deleted.
+    ///
+    /// Provides data about the scheduled event.
+    async fn guild_scheduled_event_delete(&self, _ctx: Context, _event: ScheduledEvent) {}
+
+    /// Dispatched when a guild member has subscribed to a scheduled event.
+    ///
+    /// Provides data about the subscription.
+    async fn guild_scheduled_event_user_add(
         &self,
         _ctx: Context,
-        _application_command: serenity::model::interactions::application_command::ApplicationCommand,
+        _subscribed: GuildScheduledEventUserAddEvent,
     ) {
-        events::interactions::application_command_update(_ctx, _application_command).await;
     }
 
-    async fn application_command_delete(
+    /// Dispatched when a guild member has unsubscribed from a scheduled event.
+    ///
+    /// Provides data about the cancelled subscription.
+    async fn guild_scheduled_event_user_remove(
         &self,
         _ctx: Context,
-        _application_command: serenity::model::interactions::application_command::ApplicationCommand,
+        _unsubscribed: GuildScheduledEventUserRemoveEvent,
     ) {
-        events::interactions::application_command_delete(_ctx, _application_command).await;
     }
 }
 
-pub struct MysqlConnection;
+// pub struct MysqlConnection;
 
-impl TypeMapKey for MysqlConnection {
-    type Value = mysql_async::Pool;
-}
+// impl TypeMapKey for MysqlConnection {
+//     type Value = mysql_async::Pool;
+// }
 
 pub struct HasBossMusic;
 impl TypeMapKey for HasBossMusic {
@@ -428,7 +547,33 @@ impl TypeMapKey for HasBossMusic {
 
 #[tokio::main]
 async fn main() {
-    let mysql_pool = mysql_async::Pool::new(config::DB_URL);
+    // install global collector configured based on RUST_LOG env var.
+    let subscriber = FmtSubscriber::builder()
+        // .with_thread_names(true)
+        // .with_file(true)
+        // .with_target(true)
+        // .with_line_number(true)
+        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+        // will be written to stdout.
+        .with_max_level(Level::INFO)
+        .pretty()
+        // completes the builder.
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    info!("pog");
+    tracing::log::info!("yak shaving completed.");
+    // create relevant folders
+    if !std::path::Path::new(events::voice::RECORDING_FILE_PATH).exists() {
+        match tokio::fs::create_dir_all(events::voice::RECORDING_FILE_PATH).await {
+            Ok(_) => {}
+            Err(err) => {
+                panic!("cannot create path: {}", err)
+            }
+        };
+    }
+    // let mysql_pool = mysql_async::Pool::new(config::DB_URL);
     // let conn = mysql_pool.get_conn().await.unwrap();
 
     // let a = conn.exec_map("SELECT * FROM guilds WHERE id IN (:id)", db_param, | id | DBGuild { id });
@@ -441,19 +586,20 @@ async fn main() {
     // read the audio data that other people are sending us!
     let songbird_config = Config::default().decode_mode(DecodeMode::Decode);
 
+    let intents = GatewayIntents::all();
     // Create a new instance of the Client, logging in as a bot. This will
     // automatically prepend your bot token with "Bot ", which is a requirement
     // by Discord for bot users.
-    let mut client = Client::builder(&token)
+    let mut client = Client::builder(&token, intents)
         .event_handler(Handler)
-        .intents(GatewayIntents::all())
+        .intents(intents)
         .register_songbird_from_config(songbird_config)
         .application_id(application_id)
         .await
         .expect("Err creating client");
     {
         let mut data = client.data.write().await;
-        data.insert::<MysqlConnection>(mysql_pool.clone());
+        // data.insert::<MysqlConnection>(mysql_pool.clone());
         data.insert::<HasBossMusic>(HashMap::new());
     }
 

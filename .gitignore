@@ -2,3 +2,4 @@
 .env
 /src/config.rs
 /voice_recordings
+/clips

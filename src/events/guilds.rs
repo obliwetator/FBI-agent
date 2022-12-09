@@ -23,7 +23,7 @@ pub async fn guild_create(_ctx: Context, guild: serenity::model::guild::Guild, i
 
 pub async fn guild_delete(
     _ctx: Context,
-    _incomplete: serenity::model::guild::GuildUnavailable,
+    _incomplete: serenity::model::guild::UnavailableGuild,
     _full: Option<serenity::model::guild::Guild>,
 ) {
     todo!()
@@ -38,11 +38,7 @@ pub async fn guild_member_removal(
     todo!()
 }
 
-pub async fn guild_member_addition(
-    _ctx: Context,
-    _guild_id: serenity::model::id::GuildId,
-    _new_member: serenity::model::guild::Member,
-) {
+pub async fn guild_member_addition(_ctx: Context, _new_member: serenity::model::guild::Member) {
     todo!()
 }
 

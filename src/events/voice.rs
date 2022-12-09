@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::{collections::HashMap, time::Instant};
 
 use serenity::{
     async_trait,
@@ -7,17 +7,20 @@ use serenity::{
     model::id::{ChannelId, GuildId},
     prelude::Mutex,
 };
+
 use songbird::{
-    model::payload::{ClientConnect, ClientDisconnect, Speaking},
+    model::payload::{ClientDisconnect, Speaking},
     CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler,
 };
 use tokio::{
     io::AsyncWriteExt,
     process::{Child, Command},
 };
+use tracing::{error, info};
 
-pub const RECORDING_FILE_PATH: &str = "/home/ubuntu/FBIagent/voice_recordings";
-const DISCORD_SAMPLE_RATE: u16 = 48000;
+pub const RECORDING_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/voice_recordings";
+const BUFFER_SIZE: usize = 1024 * 1024;
+// const DISCORD_SAMPLE_RATE: u16 = 48000;
 
 #[derive(Clone)]
 struct Receiver {
@@ -27,9 +30,12 @@ struct Receiver {
     ssrc_hashmap: Arc<Mutex<HashMap<u32, Option<u64>>>>,
     user_id_hashmap: Arc<Mutex<HashMap<u64, u32>>>,
     ssrc_ffmpeg_hashmap: Arc<Mutex<HashMap<u32, Child>>>,
-    now: Arc<Mutex<HashMap<u32, std::time::Instant>>>,
+    // now: Arc<Mutex<HashMap<u32, std::time::Instant>>>,
     guild_id: GuildId,
-    user_status: Arc<Mutex<HashMap<u32, UserStatus>>>,
+    buffer: Arc<Mutex<HashMap<u32, Vec<i16>>>>,
+    size: Arc<Mutex<HashMap<u32, usize>>>,
+    how_long: Arc<Mutex<HashMap<u32, Instant>>>,
+    duration: Arc<Mutex<HashMap<u32, u128>>>,
 }
 
 impl Receiver {
@@ -41,29 +47,24 @@ impl Receiver {
             ssrc_hashmap: Arc::new(Mutex::new(HashMap::new())),
             user_id_hashmap: Arc::new(Mutex::new(HashMap::new())),
             ssrc_ffmpeg_hashmap: Arc::new(Mutex::new(HashMap::new())),
-            now: Arc::new(Mutex::new(HashMap::new())),
+            // now: Arc::new(Mutex::new(HashMap::new())),
             guild_id,
-            user_status: Arc::new(Mutex::new(HashMap::new())),
+            buffer: Arc::new(Mutex::new(HashMap::new())),
+            size: Arc::new(Mutex::new(HashMap::new())),
+            how_long: Arc::new(Mutex::new(HashMap::new())),
+            duration: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-}
 
-struct UserStatus {
-    // user_id: u64,
-// start: std::time::Instant,
-// speaking: bool,
-// time_passed: u128,
-// start2: std::time::Instant,
-}
+    pub async fn format_size(&self, ssrc: &u32) {
+        {
+            let size = self.size.lock().await.get(ssrc).unwrap() * std::mem::size_of::<i16>();
+            let duration = *self.duration.lock().await.get(ssrc).unwrap();
 
-impl UserStatus {
-    fn new(user_id: u64, start: std::time::Instant, muted: bool) -> Self {
-        Self {
-            // user_id,
-            // start,
-            // speaking: muted,
-            // time_passed: 0,
-            // start2: std::time::Instant::now(),
+            info!(
+                "size of bytes is :{} and the length is :{} ms",
+                size, duration
+            )
         }
     }
 }
@@ -91,7 +92,7 @@ impl VoiceEventHandler for Receiver {
                 // SSRCs and map the SSRC to the User ID and maintain this state.
                 // Using this map, you can map the `ssrc` in `voice_packet`
                 // to the user ID and handle their audio packets separately.
-                println!(
+                info!(
                     "Speaking state update: user {:?} has SSRC {:?}, using {:?}",
                     user_id, ssrc, speaking,
                 );
@@ -100,7 +101,6 @@ impl VoiceEventHandler for Receiver {
                     .ctx_main
                     .cache
                     .member(self.guild_id, user_id.unwrap().0)
-                    .await
                     .unwrap();
 
                 if member.user.bot {
@@ -110,6 +110,12 @@ impl VoiceEventHandler for Receiver {
                         self.ssrc_hashmap.lock().await.insert(*ssrc, None);
                     }
                 } else {
+                    {
+                        self.how_long.lock().await.insert(*ssrc, Instant::now());
+                        self.duration.lock().await.insert(*ssrc, 0);
+                        self.size.lock().await.insert(*ssrc, 0);
+                        self.buffer.lock().await.insert(*ssrc, vec![0; BUFFER_SIZE]);
+                    }
                     println!("is NOT bot");
                     // no user in map add
                     {
@@ -127,16 +133,11 @@ impl VoiceEventHandler for Receiver {
                     }
 
                     {
-                        self.user_status.lock().await.insert(
-                            *ssrc,
-                            UserStatus::new(user_id.unwrap().0, std::time::Instant::now(), false),
-                        );
-                    }
-
-                    {
                         if self.ssrc_ffmpeg_hashmap.lock().await.get(ssrc).is_some() {
                             // we have already spawned an ffmpeg process
+                            error!("already got ffmpegf process");
                         } else {
+                            println!("New ffmpegf process");
                             // Create a process
                             let path =
                                 create_path(*ssrc, self.guild_id, user_id.unwrap().0, member).await;
@@ -144,7 +145,7 @@ impl VoiceEventHandler for Receiver {
                             let child = spawn_ffmpeg(&path);
                             self.ssrc_ffmpeg_hashmap.lock().await.insert(*ssrc, child);
 
-                            println!("file created for ssrc: {}", *ssrc);
+                            println!("1 file created for ssrc: {}", *ssrc);
                         }
                     }
                 }
@@ -153,49 +154,23 @@ impl VoiceEventHandler for Receiver {
                 // You can implement logic here which reacts to a user starting
                 // or stopping speaking.
 
-                // TODO: When user is silence add 0's to the file
-                // 1) Count how long the user wasn't speaking. Add the equivalent ammount on the next packet update
-                // 2) While the user is set as stopped contiously add 0's (much harder?)
-                // println!(
-                //     "Source {} has {} speaking.",
-                //     data.ssrc,
-                //     if data.speaking { "started" } else { "stopped" },
-                // );
-                // not speaking
                 if !data.speaking {
                     {
-                        // // User stopped speaking. start a timer
-                        // let mut a = self.user_status.lock().await;
-                        // if let Some(user_status) = a.get_mut(&data.ssrc) {
-                        //     user_status.speaking = false;
-                        //     // reset
-                        //     user_status.start = std::time::Instant::now();
-                        //     // reset
-                        //     user_status.time_passed = 0.0;
-                        //     println!("reset");
-                        // } else {
-                        //     println!("no user status NOT speaking");
-                        // }
-                    }
-                }
-                // else {
-                //     {
-                //         // User started speaking again. Time how long user WASN'T speaking
-                //         // let mut user_status = self.user_status.lock().await;
-                //         // if let Some(user_status) = user_status.get_mut(&data.ssrc) {
-                //         //     user_status.speaking = true;
-                //         //     // Time elapsed since we started timeing it above
-                //         //     user_status.time_passed = user_status.start.elapsed().as_millis();
+                        let duration = self
+                            .how_long
+                            .lock()
+                            .await
+                            .get(&data.ssrc)
+                            .unwrap()
+                            .elapsed()
+                            .as_millis();
 
-                //         //     println!(
-                //         //         "time passed not speaking in millis: {}",
-                //         //         user_status.time_passed
-                //         //     );
-                //         // } else {
-                //         //     // println!("no user status speaking");
-                //         // }
-                //     }
-                // }
+                        *self.duration.lock().await.get_mut(&data.ssrc).unwrap() = duration;
+                        info!("not speaking");
+                    }
+                } else {
+                    info!("speaking");
+                }
             }
             Ctx::VoicePacket(data) => {
                 let now = std::time::Instant::now();
@@ -207,59 +182,30 @@ impl VoiceEventHandler for Receiver {
                     .get_mut(&data.packet.ssrc)
                 {
                     if let Some(audio_i16) = data.audio {
+                        {
+                            let lock = self.size.lock().await;
+                            let value = *lock.get(&data.packet.ssrc).unwrap();
+                            drop(lock);
+                            *self.size.lock().await.get_mut(&data.packet.ssrc).unwrap() =
+                                audio_i16.len() + value;
+                        }
                         // let mut consecutive = 0u32;
                         // println!(
                         //     "Audio packet's first 5 samples: {:?}",
-                        //     // audio.get(..5.min(audio.len()))
+                        // audio.get(..5.min(audio.len()))
                         //     audio
                         // );
+
+                        info!("Audio Data: {:?}", audio_i16.get(..5.min(audio_i16.len())));
 
                         // println!(
                         // 	"Audio packet sequence {:05} has {:04} bytes (decompressed from {}), SSRC {}",
                         // 	data.packet.sequence.0,
-                        // 	audio.len() * std::mem::size_of::<i16>(),
+                        // 	audio_i16.len() * std::mem::size_of::<i16>(),
                         // 	data.packet.payload.len(),
                         // 	data.packet.ssrc,
                         // );
                         if let Some(stdin) = child.stdin.as_mut() {
-                            // if let Some(status) =
-                            //     self.user_status.lock().await.get_mut(&data.packet.ssrc)
-                            // {
-                            //     if status.time_passed > 0 {
-                            //         println!("from mute");
-                            //         // the size is double because ffmpeg expects i16
-                            //         let to_write = {
-                            //             let mut value = status.time_passed
-                            //                 * (DISCORD_SAMPLE_RATE / 1000) as u128
-                            //                 * 2; // Silence to write from the time not speaking
-
-                            //             // we need even amount of bytes
-                            //             if (value % 2) == 1 {
-                            //                 value += 1;
-                            //             }
-
-                            //             value
-                            //         };
-
-                            //         println!("to_write: {}", to_write);
-                            //         // From rough observation discord sends an addiitonal ~9.5 packets of silence
-                            //         // Since we write u8 we need twice as many
-
-                            //         let vec: Vec<u8> = vec![0u8; to_write as usize];
-                            //         match stdin.write_all(&*vec).await {
-                            //             Ok(_) => {}
-                            //             Err(err) => {
-                            //                 println!("Could not write to stdin: {}", err)
-                            //             }
-                            //         };
-                            //         println!("HERE: {}", now.elapsed().as_micros());
-                            //         status.speaking = false;
-                            //         status.start = std::time::Instant::now();
-                            //         status.time_passed = 0;
-                            //         // When the user stops speaking we receive at least 6(?) packets of silence. Ignroe them
-                            //         return None;
-                            //     }
-                            // }
                             let mut result: Vec<u8> = Vec::new();
                             for &n in audio_i16 {
                                 // TODO: Use buffer
@@ -297,76 +243,9 @@ impl VoiceEventHandler for Receiver {
                 // containing the call statistics and reporting information.
                 // println!("RTCP packet received: {:?}", data.packet);
             }
-            Ctx::ClientConnect(ClientConnect {
-                audio_ssrc,
-                video_ssrc,
-                user_id,
-                ..
-            }) => {
-                println!("Someone connected {}", user_id);
-                let member = self
-                    .ctx_main
-                    .cache
-                    .member(self.guild_id, user_id.0)
-                    .await
-                    .unwrap();
-                if member.user.bot {
-                    println!("bot connected");
-                } else {
-                    {
-                        self.ssrc_hashmap
-                            .lock()
-                            .await
-                            .insert(*audio_ssrc, Some(user_id.0));
-                    }
 
-                    {
-                        self.user_id_hashmap
-                            .lock()
-                            .await
-                            .insert(user_id.0, *audio_ssrc);
-                    }
-                    println!("user inserted");
-                    {
-                        self.user_status.lock().await.insert(
-                            *audio_ssrc,
-                            UserStatus::new(user_id.0, std::time::Instant::now(), false),
-                        );
-                    }
-                    {
-                        if self
-                            .ssrc_ffmpeg_hashmap
-                            .lock()
-                            .await
-                            .get(audio_ssrc)
-                            .is_some()
-                        {
-                            // we have already spawned an ffmpeg process
-                        } else {
-                            // Create a process
-                            let path =
-                                create_path(*audio_ssrc, self.guild_id, user_id.0, member).await;
-
-                            let child = spawn_ffmpeg(&path);
-                            self.ssrc_ffmpeg_hashmap
-                                .lock()
-                                .await
-                                .insert(*audio_ssrc, child);
-
-                            println!("file created for ssrc: {}", *audio_ssrc);
-                        }
-                    }
-                }
-
-                // You can implement your own logic here to handle a user who has joined the
-                // voice channel e.g., allocate structures, map their SSRC to User ID.
-
-                println!(
-                    "Client connected: user {:?} has audio SSRC {:?}, video SSRC {:?}",
-                    user_id, audio_ssrc, video_ssrc,
-                );
-            }
-            Ctx::ClientDisconnect(ClientDisconnect { user_id, .. }) => {
+            Ctx::ClientDisconnect(ClientDisconnect { user_id }) => {
+                error!("client disconets id: {}", user_id);
                 // You can implement your own logic here to handle a user who has left the
                 // voice channel e.g., finalise processing of statistics etc.
                 // You will typically need to map the User ID to their SSRC; observed when
@@ -374,29 +253,23 @@ impl VoiceEventHandler for Receiver {
 
                 {
                     // Bots
-                    let a = self.user_id_hashmap.lock().await;
-                    if let Some(ab) = a.get(&user_id.0) {
-                        let b = self.ssrc_hashmap.lock().await;
-                        if let Some(ba) = b.get(ab) {
+                    let get_user_hashmap = self.user_id_hashmap.lock().await;
+                    if let Some(get_user_ssrc) = get_user_hashmap.get(&user_id.0) {
+                        let get_user_ssrc_hashmap = self.ssrc_hashmap.lock().await;
+                        if let Some(ba) = get_user_ssrc_hashmap.get(get_user_ssrc) {
                             if ba.is_none() {
                                 // bot ignore
+                                info!("bot ignore");
                                 return None;
                             }
                         } else {
+                            error!("no ssrc in hashmap");
                             return None;
                         }
                     } else {
+                        error!("no user id in hashmap");
                         return None;
                     }
-                }
-
-                {
-                    let _ = self
-                        .user_status
-                        .lock()
-                        .await
-                        .remove(self.user_id_hashmap.lock().await.get(&user_id.0).unwrap())
-                        .unwrap();
                 }
 
                 {
@@ -407,9 +280,12 @@ impl VoiceEventHandler for Receiver {
                             return None;
                         }
                     };
-                    let a = self.ssrc_ffmpeg_hashmap.lock().await.remove(&ssrc).unwrap();
 
-                    let output = a.wait_with_output().await.unwrap();
+                    self.format_size(&ssrc).await;
+
+                    let child = self.ssrc_ffmpeg_hashmap.lock().await.remove(&ssrc).unwrap();
+
+                    let output = child.wait_with_output().await.unwrap();
                     // TODO: Remove
                     println!(
                         "stdout from wait_with_output {}",
@@ -424,6 +300,7 @@ impl VoiceEventHandler for Receiver {
                     println!("Client disconnected: user {:?}", user_id);
                 }
             }
+
             _ => {
                 // We won't be registering this struct for any more event classes.
                 unimplemented!()
@@ -441,8 +318,9 @@ fn spawn_ffmpeg(path: &str) -> Child {
         .args(["-ar", "48000"]) // sample rate
         .args(["-f", "s16le"]) // input type
         .args(["-i", "-"]) // Input name ("-" is pipe)
-        .args(["-bufsize", "64k"])
-        .args(["-b:a", "64k"]) // bitrate
+        .args(["-flush_packets", "1"]) // Input name ("-" is pipe)
+        // .args(["-bufsize", "64k"])
+        // .args(["-b:a", "64k"]) // bitrate
         .arg(format!("{}.ogg", path)) // output
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -478,16 +356,12 @@ async fn create_path(
         &RECORDING_FILE_PATH, guild_id.0, year, month
     );
     let combined_path = format!(
-        "{}/{}/{}/{}/{}-{}-{}-{}-{}-{}-{}",
+        "{}/{}/{}/{}/{}-{}-{}",
         &RECORDING_FILE_PATH,
         guild_id.0,
         year,
         month,
-        day_name,
-        day_number,
-        hour,
-        minute,
-        seconds,
+        since_the_epoch.as_millis(),
         user_id,
         member.user.name
     );
@@ -512,7 +386,6 @@ pub async fn voice_server_update(
 
 pub async fn voice_state_update(
     ctx: Context,
-    guild_id: Option<serenity::model::id::GuildId>,
     old_state: Option<serenity::model::prelude::VoiceState>,
     new_state: serenity::model::prelude::VoiceState,
 ) {
@@ -523,7 +396,6 @@ pub async fn voice_state_update(
         if let Some(channel) = old_state.unwrap().channel_id {
             if channel
                 .to_channel_cached(&ctx)
-                .await
                 .unwrap()
                 .guild()
                 .unwrap()
@@ -536,11 +408,10 @@ pub async fn voice_state_update(
             // TODO: fix that atrocity ^
             // TODO: Other bots might be present in the channel. Don't count bots
             {
-                leave_voice_channel(&ctx, guild_id.unwrap()).await;
+                leave_voice_channel(&ctx, new_state.guild_id.unwrap()).await;
             }
         }
 
-        println!("is_none");
         return;
     }
 
@@ -566,8 +437,7 @@ pub async fn voice_state_update(
 
     let all_channels = ctx
         .cache
-        .guild(guild_id.unwrap())
-        .await
+        .guild(new_state.guild_id.unwrap())
         .expect("cannot clone guild from cache")
         .channels;
 
@@ -575,11 +445,29 @@ pub async fn voice_state_update(
     let mut highest_channel_len: usize = 0;
 
     for (channel_id, guild_channel) in all_channels {
-        if guild_channel.kind == serenity::model::channel::ChannelType::Voice
-            && guild_channel.members(&ctx).await.expect("cannot get").len() >= highest_channel_len
-        {
-            highest_channel_len = guild_channel.members(&ctx).await.expect("cannot get").len();
-            highest_channel_id = guild_channel.id;
+        match guild_channel {
+            serenity::model::prelude::Channel::Guild(guild_guild_channel) => {
+                if let serenity::model::prelude::ChannelType::Voice = guild_guild_channel.kind {
+                    let count = match guild_guild_channel.members(&ctx).await {
+                        Ok(ok) => ok,
+                        Err(_) => {
+                            error!("This should not trigger");
+                            return;
+                        }
+                    };
+
+                    if count.len() > highest_channel_len {
+                        highest_channel_len = count.len();
+                        highest_channel_id = guild_guild_channel.id;
+                    }
+                }
+            }
+            serenity::model::prelude::Channel::Private(ok) => {}
+            serenity::model::prelude::Channel::Category(ok) => {}
+            _ => {
+                error!("unkown channel type");
+                unimplemented!()
+            }
         }
     }
 
@@ -587,7 +475,7 @@ pub async fn voice_state_update(
     println!("highest channel len: {}", highest_channel_len);
 
     if highest_channel_len > 0 {
-        connect_to_voice_channel(&ctx, guild_id.unwrap(), highest_channel_id).await;
+        connect_to_voice_channel(&ctx, new_state.guild_id.unwrap(), highest_channel_id).await;
     }
 
     // if new_state.member.as_ref().unwrap().user.bot {
@@ -627,6 +515,8 @@ pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_
         .expect("Songbird Voice client placed in at initialisation.")
         .clone();
 
+    println!("CH {:?}", channel_id);
+
     // Don't connect to a channel we are already in
     // TODO: will have to re-register all the event handler + songbird might already be doing this for us
     // {
@@ -639,36 +529,50 @@ pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_
     //         }
     //     }
     // }
-    let (handler_lock, conn_result) = manager.join(guild_id, channel_id).await;
 
-    match conn_result {
-        Ok(()) => {
-            println!("Joined {}", channel_id);
+    let option = manager.get(guild_id);
+    if let Some(arc_call) = option {
+        // alreday have the call dont rejoin
+        info!("already in channel")
+    } else {
+        // join channel
 
-            // NOTE: this skips listening for the actual connection result.
-            let mut handler = handler_lock.lock().await;
-            // Remove any old events in case the bot swaps channels
-            handler.remove_all_global_events();
+        let (handler_lock, res) = manager.join(guild_id, channel_id).await;
+        match res {
+            Ok(_) => {
+                info!("Joined {}", channel_id);
+                let mut handler = handler_lock.lock().await;
+                let res = handler.join(channel_id).await;
+                match res {
+                    Ok(_) => {}
+                    Err(err) => {
+                        panic!("cannot join channel: {}", err);
+                    }
+                }
+                // Remove any old events in case the bot swaps channels
+                // handler.remove_all_global_events();
 
-            let ctx1 = Arc::new(ctx.clone());
-            let receiver = Receiver::new(ctx1, guild_id).await;
+                let ctx1 = Arc::new(ctx.clone());
+                let receiver = Receiver::new(ctx1, guild_id).await;
 
-            handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
+                handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
 
-            handler.add_global_event(CoreEvent::SpeakingUpdate.into(), receiver.clone());
+                handler.add_global_event(CoreEvent::SpeakingUpdate.into(), receiver.clone());
 
-            handler.add_global_event(CoreEvent::VoicePacket.into(), receiver.clone());
+                handler.add_global_event(CoreEvent::VoicePacket.into(), receiver.clone());
 
-            handler.add_global_event(CoreEvent::RtcpPacket.into(), receiver.clone());
+                handler.add_global_event(CoreEvent::RtcpPacket.into(), receiver.clone());
 
-            handler.add_global_event(CoreEvent::ClientConnect.into(), receiver.clone());
+                // handler.add_global_event(CoreEvent::DriverConnect.into(), receiver.clone());
+                // handler.add_global_event(CoreEvent::DriverDisconnect.into(), receiver.clone());
 
-            handler.add_global_event(CoreEvent::ClientDisconnect.into(), receiver.clone());
+                handler.add_global_event(CoreEvent::ClientDisconnect.into(), receiver.clone());
 
-            drop(receiver);
-        }
-        Err(err) => {
-            panic!("Could not join channel: {}", err)
+                drop(receiver);
+            }
+            Err(err) => {
+                panic!("cannot join channel: {}", err);
+            }
         }
     }
 }
