@@ -4,7 +4,6 @@ use serenity::{
     client::Context,
     model::channel::{Message, MessageType},
 };
-use tracing::info;
 
 pub async fn message(ctx: Context, msg: Message) {
     // let pool = db_helper::get_pool_from_ctx(&ctx).await;
@@ -34,7 +33,7 @@ pub async fn message(ctx: Context, msg: Message) {
         MessageType::GuildDiscoveryGracePeriodFinalWarning => todo!(),
         MessageType::ThreadCreated => todo!(),
         MessageType::ChatInputCommand => {
-            info!("slash command message: {:#?}", msg);
+            // info!("slash command message: {:#?}", msg);
         }
         MessageType::ThreadStarterMessage => todo!(),
         MessageType::ContextMenuCommand => todo!(),
