@@ -19,6 +19,7 @@ use tokio::{
 use tracing::{error, info};
 
 pub const RECORDING_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/voice_recordings";
+pub const CLIPS_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/clips";
 const BUFFER_SIZE: usize = 1024 * 1024;
 // const DISCORD_SAMPLE_RATE: u16 = 48000;
 
@@ -156,20 +157,12 @@ impl VoiceEventHandler for Receiver {
 
                 if !data.speaking {
                     {
-                        let duration = self
-                            .how_long
-                            .lock()
-                            .await
-                            .get(&data.ssrc)
-                            .unwrap()
-                            .elapsed()
-                            .as_millis();
-
-                        *self.duration.lock().await.get_mut(&data.ssrc).unwrap() = duration;
-                        info!("not speaking");
+                        if let Some(duration) = self.how_long.lock().await.get(&data.ssrc) {
+                            *self.duration.lock().await.get_mut(&data.ssrc).unwrap() =
+                                duration.elapsed().as_millis();
+                        }
                     }
                 } else {
-                    info!("speaking");
                 }
             }
             Ctx::VoicePacket(data) => {
@@ -196,8 +189,6 @@ impl VoiceEventHandler for Receiver {
                         //     audio
                         // );
 
-                        info!("Audio Data: {:?}", audio_i16.get(..5.min(audio_i16.len())));
-
                         // println!(
                         // 	"Audio packet sequence {:05} has {:04} bytes (decompressed from {}), SSRC {}",
                         // 	data.packet.sequence.0,
@@ -221,7 +212,7 @@ impl VoiceEventHandler for Receiver {
                             //     return None;
                             // }
 
-                            match stdin.write_all(&*result).await {
+                            match stdin.write_all(&result).await {
                                 Ok(_) => {}
                                 Err(err) => {
                                     println!("Could not write to stdin: {}", err)
