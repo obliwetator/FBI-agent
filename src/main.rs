@@ -1,7 +1,8 @@
 // use std::env;
 #![allow(unused_variables)]
-use std::collections::HashMap;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
+use axum::{routing::get, Router};
 use serenity::{
     async_trait,
     model::{
@@ -16,15 +17,25 @@ use serenity::{
         sticker::Sticker,
     },
     prelude::*,
-    Result as SerenityResult,
+    CacheAndHttp, Result as SerenityResult,
 };
 use songbird::{driver::DecodeMode, Config, SerenityInit};
-use tracing::{info, Level};
+use tonic::transport::Server;
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
+
+use crate::{
+    grpc::{hello_world::greeter_server::GreeterServer, MyGreeter},
+    http::root,
+};
+
+// use crate::http::hello;
 
 pub mod commands;
 pub mod config;
 pub mod events;
+pub mod grpc;
+pub mod http;
 
 struct Handler;
 
@@ -334,7 +345,7 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
 
-        let guild_id = GuildId(850192711649722368);
+        let guild_id = GuildId(362257054829641758);
 
         let commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
             commands
@@ -545,6 +556,12 @@ impl TypeMapKey for HasBossMusic {
     type Value = HashMap<u64, Option<String>>;
 }
 
+#[derive(Clone)]
+pub struct Custom {
+    cache_http: Arc<CacheAndHttp>,
+    data: Arc<RwLock<TypeMap>>,
+}
+
 #[tokio::main]
 async fn main() {
     // install global collector configured based on RUST_LOG env var.
@@ -562,7 +579,6 @@ async fn main() {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    info!("pog");
     tracing::log::info!("yak shaving completed.");
     // create relevant folders
     if !std::path::Path::new(events::voice::RECORDING_FILE_PATH).exists() {
@@ -573,6 +589,7 @@ async fn main() {
             }
         };
     }
+
     // let mysql_pool = mysql_async::Pool::new(config::DB_URL);
     // let conn = mysql_pool.get_conn().await.unwrap();
 
@@ -590,7 +607,7 @@ async fn main() {
     // Create a new instance of the Client, logging in as a bot. This will
     // automatically prepend your bot token with "Bot ", which is a requirement
     // by Discord for bot users.
-    let mut client = Client::builder(&token, intents)
+    let mut client = Client::builder(token, intents)
         .event_handler(Handler)
         .intents(intents)
         .register_songbird_from_config(songbird_config)
@@ -603,13 +620,56 @@ async fn main() {
         data.insert::<HasBossMusic>(HashMap::new());
     }
 
-    // Finally, start a single shard, and start listening to events.
-    //
-    // Shards will automatically attempt to reconnect, and will perform
-    // exponential backoff until it reconnects.
-    if let Err(why) = client.start().await {
-        println!("Client error: {:?}", why);
-    }
+    let http_cache = client.cache_and_http.clone();
+    let data = client.data.clone();
+
+    let custom = Custom {
+        cache_http: http_cache,
+        data,
+    };
+
+    let one = tokio::spawn(async move {
+        client.start().await.unwrap();
+    });
+
+    // client.cache_and_http.cache.guild(id)
+    let two = tokio::spawn(async move {
+        // build our application with a route
+        let app = Router::new().route("/", get(root)).with_state(custom);
+
+        // `GET /` goes to `root`
+
+        // run our app with hyper
+        // `axum::Server` is a re-export of `hyper::Server`
+        let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+        tracing::debug!("listening on {}", addr);
+        axum::Server::bind(&addr)
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let three = tokio::spawn(async move {
+        let addr = "[::1]:50051".parse().unwrap();
+        let greeter = MyGreeter::default();
+
+        println!("GreeterServer listening on {}", addr);
+
+        Server::builder()
+            .add_service(GreeterServer::new(greeter))
+            .serve(addr)
+            .await
+    });
+
+    let (first, second, third) = tokio::join!(one, two, three);
+
+    // // Finally, start a single shard, and start listening to events.
+    // //
+    // // Shards will automatically attempt to reconnect, and will perform
+    // // exponential backoff until it reconnects.
+    // if let Err(why) = client.start().await {
+    //     println!("Client error: {:?}", why);
+    // }
 }
 
 pub fn check_msg(result: SerenityResult<Message>) {
