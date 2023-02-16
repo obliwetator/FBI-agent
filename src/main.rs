@@ -1,8 +1,7 @@
 // use std::env;
 #![allow(unused_variables)]
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
-use axum::{routing::get, Router};
 use serenity::{
     async_trait,
     model::{
@@ -24,10 +23,7 @@ use tonic::transport::Server;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-use crate::{
-    grpc::{hello_world::greeter_server::GreeterServer, MyGreeter},
-    http::root,
-};
+use crate::grpc::{hello_world::jammer_server::JammerServer, MyJammer};
 
 // use crate::http::hello;
 
@@ -632,36 +628,37 @@ async fn main() {
         client.start().await.unwrap();
     });
 
-    // client.cache_and_http.cache.guild(id)
-    let two = tokio::spawn(async move {
-        // build our application with a route
-        let app = Router::new().route("/", get(root)).with_state(custom);
+    // // client.cache_and_http.cache.guild(id)
+    // let two = tokio::spawn(async move {
+    //     // build our application with a route
+    //     let app = Router::new().route("/", get(root)).with_state(&custom);
 
-        // `GET /` goes to `root`
+    //     // `GET /` goes to `root`
 
-        // run our app with hyper
-        // `axum::Server` is a re-export of `hyper::Server`
-        let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-        tracing::debug!("listening on {}", addr);
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service())
-            .await
-            .unwrap();
-    });
+    //     // run our app with hyper
+    //     // `axum::Server` is a re-export of `hyper::Server`
+    //     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    //     tracing::debug!("listening on {}", addr);
+    //     axum::Server::bind(&addr)
+    //         .serve(app.into_make_service())
+    //         .await
+    //         .unwrap();
+    // });
 
     let three = tokio::spawn(async move {
-        let addr = "[::1]:50051".parse().unwrap();
-        let greeter = MyGreeter::default();
+        let addr = "[::1]:50052".parse().unwrap();
+
+        let jammer = MyJammer::new(custom);
 
         println!("GreeterServer listening on {}", addr);
 
         Server::builder()
-            .add_service(GreeterServer::new(greeter))
+            .add_service(JammerServer::new(jammer))
             .serve(addr)
             .await
     });
 
-    let (first, second, third) = tokio::join!(one, two, three);
+    let (first, third) = tokio::join!(one, three);
 
     // // Finally, start a single shard, and start listening to events.
     // //
