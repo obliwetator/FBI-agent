@@ -18,6 +18,8 @@ use tokio::{
 };
 use tracing::{error, info};
 
+use crate::Handler;
+
 pub const RECORDING_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/voice_recordings";
 pub const CLIPS_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/clips";
 const BUFFER_SIZE: usize = 1024 * 1024;
@@ -370,12 +372,14 @@ async fn create_path(
 }
 
 pub async fn voice_server_update(
+    _self: &Handler,
     _ctx: Context,
     _update: serenity::model::event::VoiceServerUpdateEvent,
 ) {
 }
 
 pub async fn voice_state_update(
+    _self: &Handler,
     ctx: Context,
     old_state: Option<serenity::model::prelude::VoiceState>,
     new_state: serenity::model::prelude::VoiceState,

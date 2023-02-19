@@ -6,9 +6,11 @@ use serenity::{
 };
 use songbird::input::Restartable;
 
+use crate::Handler;
+
 use super::voice::RECORDING_FILE_PATH;
 
-pub async fn interaction_create(ctx: Context, interaction: Interaction) {
+pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Interaction) {
     match interaction {
         Interaction::Ping(_) => todo!(),
         Interaction::ApplicationCommand(application_command) => {

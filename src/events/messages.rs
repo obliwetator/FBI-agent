@@ -5,7 +5,9 @@ use serenity::{
     model::channel::{Message, MessageType},
 };
 
-pub async fn message(ctx: Context, msg: Message) {
+use crate::Handler;
+
+pub async fn message(_self: &Handler, ctx: Context, msg: Message) {
     // let pool = db_helper::get_pool_from_ctx(&ctx).await;
     // db_helper::get_channels(&pool).await;
 
@@ -46,6 +48,7 @@ pub async fn message(ctx: Context, msg: Message) {
 }
 
 pub async fn message_delete(
+    _self: &Handler,
     _ctx: Context,
     _channel_id: serenity::model::id::ChannelId,
     _deleted_message_id: serenity::model::id::MessageId,
@@ -55,6 +58,7 @@ pub async fn message_delete(
 }
 
 pub async fn message_delete_bulk(
+    _self: &Handler,
     _ctx: Context,
     _channel_id: serenity::model::id::ChannelId,
     _multiple_deleted_messages_ids: Vec<serenity::model::id::MessageId>,
@@ -64,6 +68,7 @@ pub async fn message_delete_bulk(
 }
 
 pub async fn message_update(
+    _self: &Handler,
     _ctx: Context,
     _old_if_available: Option<Message>,
     _new: Option<Message>,
