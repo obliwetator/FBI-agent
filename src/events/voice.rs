@@ -21,6 +21,7 @@ use tracing::{error, info};
 use crate::Handler;
 
 pub const RECORDING_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/voice_recordings";
+pub const RECORDING_FILE_PATH_V2: &str = "/home/tulipan/projects/FBI-agent/voice_recordings_v2";
 pub const CLIPS_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/clips";
 const BUFFER_SIZE: usize = 1024 * 1024;
 // const DISCORD_SAMPLE_RATE: u16 = 48000;
@@ -35,6 +36,7 @@ struct Receiver {
     ssrc_ffmpeg_hashmap: Arc<Mutex<HashMap<u32, Child>>>,
     // now: Arc<Mutex<HashMap<u32, std::time::Instant>>>,
     guild_id: GuildId,
+    channel_id: ChannelId,
     buffer: Arc<Mutex<HashMap<u32, Vec<i16>>>>,
     size: Arc<Mutex<HashMap<u32, usize>>>,
     how_long: Arc<Mutex<HashMap<u32, Instant>>>,
@@ -42,7 +44,7 @@ struct Receiver {
 }
 
 impl Receiver {
-    pub async fn new(ctx: Arc<Context>, guild_id: GuildId) -> Self {
+    pub async fn new(ctx: Arc<Context>, guild_id: GuildId, channel_id: ChannelId) -> Self {
         // You can manage state here, such as a buffer of audio packet bytes so
         // you can later store them in intervals.
         Self {
@@ -52,6 +54,7 @@ impl Receiver {
             ssrc_ffmpeg_hashmap: Arc::new(Mutex::new(HashMap::new())),
             // now: Arc::new(Mutex::new(HashMap::new())),
             guild_id,
+            channel_id,
             buffer: Arc::new(Mutex::new(HashMap::new())),
             size: Arc::new(Mutex::new(HashMap::new())),
             how_long: Arc::new(Mutex::new(HashMap::new())),
@@ -143,9 +146,20 @@ impl VoiceEventHandler for Receiver {
                             println!("New ffmpegf process");
                             // Create a process
                             let path =
-                                create_path(*ssrc, self.guild_id, user_id.unwrap().0, member).await;
+                                create_path(*ssrc, self.guild_id, user_id.unwrap().0, &member)
+                                    .await;
+
+                            let path_v2 = create_path_v2(
+                                *ssrc,
+                                self.guild_id,
+                                self.channel_id,
+                                user_id.unwrap().0,
+                                &member,
+                            )
+                            .await;
 
                             let child = spawn_ffmpeg(&path);
+                            let child = spawn_ffmpeg(&path_v2);
                             self.ssrc_ffmpeg_hashmap.lock().await.insert(*ssrc, child);
 
                             println!("1 file created for ssrc: {}", *ssrc);
@@ -328,7 +342,7 @@ async fn create_path(
     ssrc: u32,
     guild_id: GuildId,
     user_id: u64,
-    member: serenity::model::guild::Member,
+    member: &serenity::model::guild::Member,
 ) -> String {
     let start = std::time::SystemTime::now();
     let since_the_epoch = start
@@ -358,6 +372,53 @@ async fn create_path(
         user_id,
         member.user.name
     );
+
+    // Try to create the dir in case it does not exist
+    // Delete the
+    match std::fs::create_dir_all(dir_path) {
+        Ok(_) => {}
+        Err(err) => {
+            panic!("cannot create path: {}", err);
+        }
+    };
+
+    combined_path
+}
+
+async fn create_path_v2(
+    ssrc: u32,
+    guild_id: GuildId,
+    channel_id: ChannelId,
+    user_id: u64,
+    member: &serenity::model::guild::Member,
+) -> String {
+    let start = std::time::SystemTime::now();
+    let since_the_epoch = start
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Time went backwards");
+
+    let now = chrono::Utc::now();
+    let year = format!("{}", now.format("%Y"));
+    let month = format!("{}", now.format("%B"));
+    // let day_number = format!("{}", now.format("%d"));
+    // let day_name = format!("{}", now.format("%A"));
+    // let hour = format!("{}", now.format("%H"));
+    // let minute = format!("{}", now.format("%M"));
+    // let seconds = format!("{}", now.format("%S"));
+
+    let dir_path = format!(
+        "{}/{}/{}/{}/{}/",
+        &RECORDING_FILE_PATH_V2, guild_id.0, channel_id.0, year, month
+    );
+    let combined_path = format!(
+        "{}{}-{}-{}",
+        dir_path,
+        since_the_epoch.as_millis(),
+        user_id,
+        member.user.name
+    );
+
+    info!("combined_path: {}", combined_path);
 
     // Try to create the dir in case it does not exist
     // Delete the
@@ -548,7 +609,7 @@ pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_
                 // handler.remove_all_global_events();
 
                 let ctx1 = Arc::new(ctx.clone());
-                let receiver = Receiver::new(ctx1, guild_id).await;
+                let receiver = Receiver::new(ctx1, guild_id, channel_id).await;
 
                 handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
 
