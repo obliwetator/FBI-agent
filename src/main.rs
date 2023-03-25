@@ -21,7 +21,7 @@ use serenity::{
 use songbird::{driver::DecodeMode, Config, SerenityInit};
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 use tonic::transport::Server;
-use tracing::{error, Level};
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 use crate::grpc::{hello_world::jammer_server::JammerServer, MyJammer};
@@ -30,6 +30,7 @@ use crate::grpc::{hello_world::jammer_server::JammerServer, MyJammer};
 
 pub mod commands;
 pub mod config;
+mod database;
 pub mod events;
 pub mod grpc;
 pub mod http;
@@ -68,42 +69,77 @@ impl EventHandler for Handler {
     async fn auto_moderation_action_execution(&self, _ctx: Context, _execution: ActionExecution) {}
 
     async fn cache_ready(&self, ctx: Context, guilds: Vec<serenity::model::id::GuildId>) {
-        let all_channels = guilds[0].to_guild_cached(&ctx).unwrap().channels;
+        let _ = database::update_info(self, &ctx, &guilds).await;
+        let _ = database::channels::update_guilds(self, &ctx, &guilds).await;
+        let _ = database::channels::update_guild_channels(self, &ctx, &guilds).await;
+        // let all_ch: Vec<
+        //     HashMap<serenity::model::prelude::ChannelId, serenity::model::prelude::Channel>,
+        // > = guilds
+        //     .iter()
+        //     .map(|guild| {
+        //         let x = guild.to_guild_cached(&ctx).unwrap().channels;
+        //         x
+        //     })
+        //     .collect();
 
-        for (channel_id, guild_channel) in all_channels {
-            match guild_channel {
-                serenity::model::prelude::Channel::Guild(guild_guild_channel) => {
-                    if guild_guild_channel.kind == serenity::model::prelude::ChannelType::Voice {}
-                    if let serenity::model::prelude::ChannelType::Voice = guild_guild_channel.kind {
-                        let count = match guild_guild_channel.members(&ctx).await {
-                            Ok(ok) => ok,
-                            Err(_) => {
-                                error!("This should not trigger");
-                                return;
-                            }
-                        };
-                    }
-                }
-                serenity::model::prelude::Channel::Private(ok) => {}
-                serenity::model::prelude::Channel::Category(ok) => {}
-                _ => {
-                    error!("unkown channel type");
-                    unimplemented!()
-                }
-            }
-        }
+        // const BIND_LIMIT: usize = 65535;
+        // for ch in all_ch {
+        //     for (channel_id, guild_channel) in ch {
+        //         match guild_channel {
+        //             serenity::model::prelude::Channel::Guild(guild_guild_channel) => {
+        //                 use sqlx::Execute;
+        //                 // let query =
+        //                 //     "INSERT INTO channels (channel_id, target_id, kind, allow, deny) VALUES ";
+        //                 // let values = "VALUES ()";
+        //                 if serenity::model::prelude::ChannelType::Voice == guild_guild_channel.kind
+        //                 {
+        //                     let permissions = &guild_guild_channel.permission_overwrites;
+        //                     let mut query_builder: sqlx::QueryBuilder::<Postgres> = sqlx::QueryBuilder::new("INSERT INTO channel_permissions (channel_id, target_id, kind, allow, deny) ");
 
-        // // Ensure we have the same guilds as we curently received
-        // guilds::sync_guilds(&ctx, guilds).await;
-        // // Ensure the same users are present in the DB. NOTE: in large this will probably wont work(?).
-        // users::sync_users(&ctx).await;
-        // // Ensure the same roles are present in the DB.
-        // roles::sync_roles(&ctx).await;
-        // // Ensure the same channels are present in the DB.
-        // channels::sync_channels(&ctx).await;
-        // // Diffrent roles can have diffrent permissions in different channels.
-        // channels::sync_channel_roles(&ctx).await;
-        // emojis::sync_emojis(&ctx).await;
+        //                     if permissions.len() == 0 {
+        //                         info!("PERM: {:#?} CH: {}", permissions, guild_guild_channel.id.0);
+        //                     } else {
+        //                         query_builder
+        //                             .push_values(
+        //                                 permissions.into_iter().take(BIND_LIMIT / 5),
+        //                                 |mut b, permission| {
+        //                                     let result = match permission.kind {
+        // 										serenity::model::prelude::PermissionOverwriteType::Member(user_id) => (user_id.0, "user"),
+        // 										serenity::model::prelude::PermissionOverwriteType::Role(role_id) => (role_id.0, "role"),
+        // 										_ => {
+        // 											panic!("No id in kind")
+        // 										}
+        // 									};
+        //                                     // If you wanted to bind these by-reference instead of by-value,
+        //                                     // you'd need an iterator that yields references that live as long as `query_builder`,
+        //                                     // e.g. collect it to a `Vec` first.
+        //                                     b.push_bind(guild_guild_channel.id.0 as i64)
+        //                                         .push_bind(result.0 as i64)
+        //                                         .push_bind(result.1)
+        //                                         .push_bind(permission.allow.bits() as i64)
+        //                                         .push_bind(permission.deny.bits() as i64);
+        //                                 },
+        //                             )
+        //                             .push(" ON CONFLICT (channel_id, target_id) DO UPDATE SET allow = EXCLUDED.allow, deny = EXCLUDED.deny ");
+
+        //                         // let query = query_builder.build();
+
+        //                         // let sql = query.sql();
+        //                         // info!("{sql}");
+
+        //                         // let res = query.execute(&self.database).await.unwrap();
+        //                     }
+        //                 }
+        //             }
+        //             serenity::model::prelude::Channel::Private(ok) => {}
+        //             serenity::model::prelude::Channel::Category(ok) => {}
+        //             _ => {
+        //                 error!("unkown channel type");
+        //                 unimplemented!()
+        //             }
+        //         }
+        //     }
+        // }
     }
 
     async fn channel_create(
