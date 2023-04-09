@@ -20,6 +20,10 @@ pub(crate) async fn update_info(handler: &Handler, ctx: &Context, guilds: &Vec<G
 
     update_guilds(guild_cached, handler).await;
     update_roles(guild_cached, handler).await;
+
+    // TODO: Remove roles that are not present
+    // TODO: Remove roles that are not present while the bot is running
+    update_user_roles(guild_cached, handler).await;
     update_channels(guild_cached, handler).await;
     update_permissions(guild_cached, handler).await;
 }
@@ -43,6 +47,27 @@ async fn update_roles(guild_cached: &Vec<Guild>, handler: &Handler) {
         let query = query_builder.build();
 
         let res = query.execute(&handler.database).await.unwrap();
+    }
+}
+
+async fn update_user_roles(guild_cached: &Vec<Guild>, handler: &Handler) {
+    for guild in guild_cached {
+        for (user_id, user) in guild.members.iter() {
+            let perm = &user.roles;
+            if perm.len() > 0 {
+                let mut query_builder: sqlx::QueryBuilder<Postgres> =
+                    sqlx::QueryBuilder::new("INSERT INTO user_roles (user_id, role_id) ");
+
+                query_builder
+                    .push_values(perm.into_iter().take(BIND_LIMIT / 4), |mut b, role| {
+                        b.push_bind(user_id.0 as i64).push_bind(role.0 as i64);
+                    })
+                    .push(" ON CONFLICT (user_id, role_id) DO UPDATE SET role_id=EXCLUDED.role_id");
+
+                let query = query_builder.build();
+                let res = query.execute(&handler.database).await.unwrap();
+            }
+        }
     }
 }
 
