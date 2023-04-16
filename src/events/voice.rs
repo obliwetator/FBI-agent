@@ -1,19 +1,16 @@
-use std::sync::Arc;
-use std::{collections::HashMap, time::Instant};
-
+use crate::Handler;
 use serenity::{
     async_trait,
     client::Context,
     model::id::{ChannelId, GuildId},
     prelude::Mutex,
 };
-
 use songbird::{
     model::payload::{ClientDisconnect, Speaking},
     CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler,
 };
-
-use tokio::io::BufWriter;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::{
@@ -22,8 +19,6 @@ use tokio::{
 };
 use tracing::{error, info};
 
-use crate::Handler;
-
 pub const RECORDING_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/voice_recordings";
 pub const CLIPS_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/clips";
 // 6MB buffer. Hold around 30 sec of audio
@@ -31,9 +26,9 @@ pub const CLIPS_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/clips";
 // const DISCORD_SAMPLE_RATE: u16 = 48000;
 
 struct SsrcStruct {
-    user_id: Option<u64>,
     handle: JoinHandle<()>,
     tx: tokio::sync::mpsc::Sender<CustomMsg>,
+    user_id: Option<u64>,
     // rx: tokio::sync::mpsc::Receiver<CustomMsg>,
 }
 
@@ -55,9 +50,7 @@ struct Receiver {
     guild_id: GuildId,
     channel_id: ChannelId,
     buffer: Arc<Mutex<HashMap<u32, Vec<i16>>>>,
-    size: Arc<Mutex<HashMap<u32, usize>>>,
-    how_long: Arc<Mutex<HashMap<u32, Instant>>>,
-    duration: Arc<Mutex<HashMap<u32, u128>>>,
+
     is_speaking: Arc<Mutex<HashMap<u32, bool>>>,
 }
 
@@ -74,21 +67,9 @@ impl Receiver {
             guild_id,
             channel_id,
             buffer: Arc::new(Mutex::new(HashMap::new())),
-            size: Arc::new(Mutex::new(HashMap::new())),
-            how_long: Arc::new(Mutex::new(HashMap::new())),
-            duration: Arc::new(Mutex::new(HashMap::new())),
+
             is_speaking: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    pub async fn format_size(&self, ssrc: &u32) {
-        let size = self.size.lock().await.get(ssrc).unwrap() * std::mem::size_of::<i16>();
-        let duration = *self.duration.lock().await.get(ssrc).unwrap();
-
-        info!(
-            "size of bytes is :{} and the length is :{} ms",
-            size, duration
-        )
     }
 
     pub async fn leave_voice_channel(&self) {
@@ -163,14 +144,11 @@ impl VoiceEventHandler for Receiver {
                         // self.ssrc_hashmap.lock().await.insert(*ssrc, None);
                     }
                 } else {
-                    {
-                        self.is_speaking.lock().await.insert(*ssrc, false);
-                    }
+                    // {
+                    //     self.is_speaking.lock().await.insert(*ssrc, false);
+                    // }
 
                     {
-                        self.how_long.lock().await.insert(*ssrc, Instant::now());
-                        self.duration.lock().await.insert(*ssrc, 0);
-                        self.size.lock().await.insert(*ssrc, 0);
                         self.buffer.lock().await.insert(*ssrc, vec![]);
                     }
                     info!("is NOT bot");
@@ -225,25 +203,22 @@ impl VoiceEventHandler for Receiver {
                 // You can implement logic here which reacts to a user starting
                 // or stopping speaking.
 
-                if !data.speaking {
-                    error!("stopped speaking");
-
-                    let mut res = self.is_speaking.lock().await;
-                    *res.get_mut(&data.ssrc).unwrap() = false;
-
-                    {
-                        if let Some(duration) = self.how_long.lock().await.get(&data.ssrc) {
-                            *self.duration.lock().await.get_mut(&data.ssrc).unwrap() =
-                                duration.elapsed().as_millis();
-                        }
-                    }
-                } else {
-                    error!("started speaking");
-                    let mut res = self.is_speaking.lock().await;
-                    if let Some(speaking) = res.get_mut(&data.ssrc) {
-                        *speaking = true;
-                    }
-                }
+                // if !data.speaking {
+                //     {
+                //         if let Some(speaking) = self.is_speaking.lock().await.get_mut(&data.ssrc) {
+                //             *speaking = false;
+                //         }
+                //         if let Some(duration) = self.how_long.lock().await.get(&data.ssrc) {
+                //             *self.duration.lock().await.get_mut(&data.ssrc).unwrap() =
+                //                 duration.elapsed().as_millis();
+                //         }
+                //     }
+                // } else {
+                //     let mut res = self.is_speaking.lock().await;
+                //     if let Some(speaking) = res.get_mut(&data.ssrc) {
+                //         *speaking = true;
+                //     }
+                // }
             }
             Ctx::VoicePacket(data) => {
                 let res = self.is_speaking.lock().await;
@@ -267,50 +242,27 @@ impl VoiceEventHandler for Receiver {
                         // 	data.packet.ssrc,
                         // );
 
-                        {
-                            let lock = self.size.lock().await;
-                            let value = *lock.get(&data.packet.ssrc).unwrap();
-                            drop(lock);
-                            *self.size.lock().await.get_mut(&data.packet.ssrc).unwrap() =
-                                audio_i16.len() + value;
-                        }
-                        // let mut consecutive = 0u32;
-                        // info!(
-                        //     "Audio packet's first 5 samples: {:?}",
-                        // audio.get(..5.min(audio.len()))
-                        //     audio
-                        // );
-
-                        // info!(
-                        // 	"Audio packet sequence {:05} has {:04} bytes (decompressed from {}), SSRC {}",
-                        // 	data.packet.sequence.0,
-                        // 	audio_i16.len() * std::mem::size_of::<i16>(),
-                        // 	data.packet.payload.len(),
-                        // 	data.packet.ssrc,
-                        // );
+                        // {
+                        //     let mut lock = self.size.lock().await;
+                        //     let value = *lock.get(&data.packet.ssrc).unwrap();
+                        //     // drop(lock);
+                        //     *lock.get_mut(&data.packet.ssrc).unwrap() = audio_i16.len() + value;
+                        // }
 
                         let mut buffer = self.buffer.lock().await;
                         let res = buffer.get_mut(&data.packet.ssrc).unwrap();
                         if let Some(stdin) = child.stdin.as_mut() {
                             let mut result: Vec<u8> = Vec::new();
+
                             for &n in audio_i16 {
                                 // TODO: Use buffer
                                 let _ = result.write_i16_le(n).await;
-
-                                // if n == 0 {
-                                //     consecutive += 1;
-                                // }
                             }
-
-                            // If more than half of the samples are silence don't write that packet.
-                            // if consecutive > 1000 {
-                            //     return None;
-                            // }
 
                             match stdin.write_all(&result).await {
                                 Ok(_) => {}
                                 Err(err) => {
-                                    info!("Could not write to stdin: {}", err)
+                                    error!("Could not write to stdin: {}", err)
                                 }
                             };
                         } else {
@@ -369,8 +321,6 @@ impl VoiceEventHandler for Receiver {
                         }
                     };
 
-                    self.format_size(&ssrc).await;
-
                     let child = self.ssrc_ffmpeg_hashmap.lock().await.remove(&ssrc).unwrap();
 
                     let output = child.wait_with_output().await.unwrap();
@@ -401,22 +351,21 @@ impl VoiceEventHandler for Receiver {
 fn spawn_ffmpeg(path: &str) -> Child {
     let command = Command::new("ffmpeg")
         // .arg("-re") // realtime
-        .args(["-use_wallclock_as_timestamps", "true"]) // Input name ("-" is pipe)
+        .args(["-use_wallclock_as_timestamps", "true"]) // Attach timestamps to packets. Read -af aresample=async=1
         .args(["-f", "s16le"]) // input type
         .args(["-channel_layout", "stereo"])
-        .args(["-ar", "44100"]) // input type
+        .args(["-ar", "48000"]) // sample rate
         .args(["-ac", "2"]) // channel count
-        .args(["-i", "pipe:0"]) // Input name ("-" is pipe)
-        .args(["-af", "aresample=async=1"]) // Input name ("-" is pipe)
-        // .args(["-af", "aresample=async=44100"]) // Input name ("-" is pipe)
-        // .args(["-async", "44100"]) // Input name ("-" is pipe)
-        // .args(["-flush_packets", "1"]) // Input name ("-" is pipe)
-        // .args(["-bufsize", "64k"])
-        // .args(["-b:a", "64k"]) // bitrate
+        .args(["-i", "pipe:0"]) // Input name
+        .args(["-async", "1"]) // this will input silence when there is no packets comming.
+        // HOWEVER. It will not work if the packets do not have a timestamp attached to them. We can tell ffmpeg to attach its own timestamps and figure the timings by itself
+        // We use the -use_wallclock_as_timestamps argument
+        .args(["-flush_packets", "1"]) // Write to the file on every packet. While this is wasteful it allows semi realtime audio playback.
         .arg(format!("{}.ogg", path)) // output
         .stdin(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
+        // The command will hangup if the pipe is not consumed. So set it to null if we are not doing anything with it.
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
         .spawn();
 
     command.unwrap()
@@ -632,8 +581,6 @@ pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_
                 // handler.add_global_event(CoreEvent::DriverDisconnect.into(), receiver.clone());
 
                 handler.add_global_event(CoreEvent::ClientDisconnect.into(), receiver.clone());
-
-                drop(receiver);
             }
             Err(err) => {
                 manager.remove(guild_id).await.unwrap();
