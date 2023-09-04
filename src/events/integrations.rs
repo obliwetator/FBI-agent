@@ -1,6 +1,6 @@
 use serenity::client::Context;
 
-use crate::Handler;
+use crate::event_handler::Handler;
 
 pub async fn guild_integrations_update(
     _self: &Handler,

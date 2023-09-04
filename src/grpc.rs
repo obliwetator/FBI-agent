@@ -105,7 +105,6 @@ impl Jammer for MyJammer {
 async fn handle_play_audio_to_channel(id: i64, clip_name: &str, data: Arc<RwLock<TypeMap>>) {
     let data = data.read().await;
     let manager = data.get::<SongbirdKey>().cloned().unwrap();
-    // let result =songbird::ffmpeg(format!("{}{}", RECORDING_FILE_PATH, "/projects/FBI-agent/voice_recordings/362257054829641758/2022/December/1670620473631-161172393719496704-QazZ.ogg")).await.unwrap();
 
     // TODO: This does not return and error if the wrong file path is given?
     info!(" Clips to play : {}/{}.ogg", CLIPS_FILE_PATH, clip_name);

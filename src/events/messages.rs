@@ -5,7 +5,7 @@ use serenity::{
     model::channel::{Message, MessageType},
 };
 
-use crate::Handler;
+use crate::event_handler::Handler;
 
 pub async fn message(_self: &Handler, ctx: Context, msg: Message) {
     // let pool = db_helper::get_pool_from_ctx(&ctx).await;

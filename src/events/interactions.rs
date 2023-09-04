@@ -6,7 +6,7 @@ use serenity::{
 };
 use songbird::input::Restartable;
 
-use crate::Handler;
+use crate::event_handler::Handler;
 
 use super::voice::RECORDING_FILE_PATH;
 
@@ -18,7 +18,7 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                 "help" => ":(".to_string(),
                 "play" => handle_play_audio(&application_command, &ctx, "").await,
                 _ => format!(
-                    "Unkown application_command with the name {}",
+                    "Unknown application_command with the name {}",
                     application_command.data.name
                 ),
             };
@@ -46,7 +46,6 @@ pub async fn handle_play_audio(
     file_name: &str,
 ) -> String {
     let manager = songbird::get(ctx).await.unwrap();
-    // let result =songbird::ffmpeg(format!("{}{}", RECORDING_FILE_PATH, "/projects/FBI-agent/voice_recordings/362257054829641758/2022/December/1670620473631-161172393719496704-QazZ.ogg")).await.unwrap();
 
     // TODO: This does not return and error if the wrong file path is given?
     let result = Restartable::ffmpeg(

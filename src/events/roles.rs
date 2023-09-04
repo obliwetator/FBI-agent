@@ -1,6 +1,6 @@
 use serenity::client::Context;
 
-use crate::Handler;
+use crate::event_handler::Handler;
 
 pub async fn guild_role_create(_self: &Handler, _ctx: Context, _new: serenity::model::guild::Role) {
     todo!()

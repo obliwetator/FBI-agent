@@ -1,6 +1,6 @@
 use serenity::client::Context;
 
-use crate::Handler;
+use crate::event_handler::Handler;
 
 pub async fn reaction_add(
     _self: &Handler,

@@ -1,6 +1,6 @@
 pub mod channels;
 
-use crate::Handler;
+use crate::event_handler::Handler;
 use serenity::{
     model::prelude::{Channel, Guild, GuildId},
     prelude::Context,

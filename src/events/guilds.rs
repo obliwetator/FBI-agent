@@ -1,6 +1,6 @@
 use serenity::client::Context;
 
-use crate::Handler;
+use crate::event_handler::Handler;
 
 pub async fn guild_ban_addition(
     _self: &Handler,
