@@ -29,6 +29,11 @@ impl TypeMapKey for HasBossMusic {
     type Value = HashMap<u64, Option<String>>;
 }
 
+pub struct HelperStruct;
+impl TypeMapKey for HelperStruct {
+    type Value = Arc<RwLock<HashMap<u64, Option<u64>>>>;
+}
+
 pub struct MpmcChannels;
 impl TypeMapKey for MpmcChannels {
     type Value = Arc<
@@ -48,6 +53,18 @@ impl TypeMapKey for MpmcChannels {
 pub struct Custom {
     cache_http: Arc<CacheAndHttp>,
     data: Arc<RwLock<TypeMap>>,
+}
+
+pub async fn get_lock_read(ctx: &Context) -> Arc<RwLock<HashMap<u64, Option<u64>>>> {
+    let lock = {
+        let data_write = ctx.data.read().await;
+        data_write
+            .get::<HelperStruct>()
+            .expect("Expected Helper Struct")
+            .clone()
+    };
+
+    lock
 }
 
 #[tokio::main]
@@ -108,6 +125,7 @@ async fn main() {
     {
         let mut data = client.data.write().await;
         // data.insert::<MysqlConnection>(mysql_pool.clone());
+        data.insert::<HelperStruct>(Arc::new(RwLock::new(HashMap::new())));
         data.insert::<HasBossMusic>(HashMap::new());
         data.insert::<MpmcChannels>(Arc::new(RwLock::new(HashMap::new())));
     }

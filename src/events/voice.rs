@@ -1,17 +1,19 @@
-use crate::Handler;
+use crate::{event_handler::Handler, get_lock_read, MpmcChannels};
 use serenity::{
     async_trait,
     client::Context,
-    model::id::{ChannelId, GuildId},
+    model::{
+        id::{ChannelId, GuildId},
+        prelude::Member,
+    },
     prelude::Mutex,
 };
 use songbird::{
     model::payload::{ClientDisconnect, Speaking},
     CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::{collections::HashMap, time::Duration};
 use tokio::task::JoinHandle;
 use tokio::{
     io::AsyncWriteExt,
@@ -26,39 +28,50 @@ pub const CLIPS_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/clips";
 // const DISCORD_SAMPLE_RATE: u16 = 48000;
 
 struct SsrcStruct {
-    handle: JoinHandle<()>,
-    tx: tokio::sync::mpsc::Sender<CustomMsg>,
+    // handle: JoinHandle<()>,
+    // tx: tokio::sync::mpsc::Sender<CustomMsg>,
     user_id: Option<u64>,
     // rx: tokio::sync::mpsc::Receiver<CustomMsg>,
 }
 
 #[derive(Debug)]
 enum CustomMsg {
-    Get { speaking: bool },
-    Set { speaking: bool },
+    // Get { speaking: bool },
+    // Set { speaking: bool },
 }
 
 #[derive(Clone)]
 struct Receiver {
+    buffer: Arc<Mutex<HashMap<u32, Vec<i16>>>>,
+    channel_id: ChannelId,
     ctx_main: Arc<Context>,
+    // now: Arc<Mutex<HashMap<u32, std::time::Instant>>>,
+    guild_id: GuildId,
+    s_r: Arc<(
+        tokio::sync::broadcast::Sender<i32>,
+        tokio::sync::broadcast::Receiver<i32>,
+    )>,
+    ssrc_ffmpeg_hashmap: Arc<Mutex<HashMap<u32, Child>>>,
     /// the key is the ssrc, the value is the user id
     /// If the value is none that means we don't want to record that user (for now bots)
     ssrc_hashmap: Arc<Mutex<HashMap<u32, SsrcStruct>>>,
     user_id_hashmap: Arc<Mutex<HashMap<u64, u32>>>,
-    ssrc_ffmpeg_hashmap: Arc<Mutex<HashMap<u32, Child>>>,
-    // now: Arc<Mutex<HashMap<u32, std::time::Instant>>>,
-    guild_id: GuildId,
-    channel_id: ChannelId,
-    buffer: Arc<Mutex<HashMap<u32, Vec<i16>>>>,
-
-    is_speaking: Arc<Mutex<HashMap<u32, bool>>>,
 }
 
 impl Receiver {
-    pub async fn new(ctx: Arc<Context>, guild_id: GuildId, channel_id: ChannelId) -> Self {
+    pub async fn new(
+        ctx: Arc<Context>,
+        guild_id: GuildId,
+        channel_id: ChannelId,
+        s_r: Arc<(
+            tokio::sync::broadcast::Sender<i32>,
+            tokio::sync::broadcast::Receiver<i32>,
+        )>,
+    ) -> Self {
         // You can manage state here, such as a buffer of audio packet bytes so
         // you can later store them in intervals.
-        Self {
+
+        let me = Self {
             ctx_main: ctx,
             ssrc_hashmap: Arc::new(Mutex::new(HashMap::new())),
             user_id_hashmap: Arc::new(Mutex::new(HashMap::new())),
@@ -67,9 +80,12 @@ impl Receiver {
             guild_id,
             channel_id,
             buffer: Arc::new(Mutex::new(HashMap::new())),
+            s_r: s_r.clone(),
+        };
 
-            is_speaking: Arc::new(Mutex::new(HashMap::new())),
-        }
+        me.spawn_task((s_r.0.clone(), s_r.0.subscribe())).await;
+
+        me
     }
 
     pub async fn leave_voice_channel(&self) {
@@ -85,19 +101,31 @@ impl Receiver {
             // dissconect self.
             // might be optional
             let manager = songbird::get(&self.ctx_main).await.unwrap();
-            let _ = manager.remove(self.guild_id).await;
+            // let _ = manager.remove(self.guild_id).await;
         }
     }
 
     pub async fn spawn_task(
         &self,
-        ssrc: u32,
-        mut rx: tokio::sync::mpsc::Receiver<CustomMsg>,
+        mut s_r: (
+            tokio::sync::broadcast::Sender<i32>,
+            tokio::sync::broadcast::Receiver<i32>,
+        ),
     ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
-            // let mut interval = tokio::time::interval(std::time::Duration::from_millis(2000));
-            while let Some(cmd) = rx.recv().await {
-                info!("Received msg for {} with the content {:#?}", ssrc, cmd);
+            loop {
+                let res = s_r.1.recv().await.unwrap();
+                if res == 2 {
+                    let res = s_r.1.recv().await.unwrap();
+
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+
+                    s_r.0.send(2).unwrap();
+                } else {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+
+                    s_r.0.send(2).unwrap();
+                }
             }
         })
     }
@@ -105,7 +133,6 @@ impl Receiver {
 
 #[async_trait]
 impl VoiceEventHandler for Receiver {
-    #[allow(unused_variables)]
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
         use EventContext as Ctx;
         match ctx {
@@ -144,10 +171,6 @@ impl VoiceEventHandler for Receiver {
                         // self.ssrc_hashmap.lock().await.insert(*ssrc, None);
                     }
                 } else {
-                    // {
-                    //     self.is_speaking.lock().await.insert(*ssrc, false);
-                    // }
-
                     {
                         self.buffer.lock().await.insert(*ssrc, vec![]);
                     }
@@ -155,17 +178,17 @@ impl VoiceEventHandler for Receiver {
                     // no user in map add
                     {
                         // Have to clone outisde the task
-                        let ssrc_clone = ssrc.clone();
-                        let (tx, rx) = mpsc::channel::<CustomMsg>(32);
-                        let task = self.spawn_task(ssrc_clone, rx).await;
+                        // let ssrc_clone = ssrc.clone();
+                        // let (tx, rx) = mpsc::channel::<CustomMsg>(32);
+                        // let task = self.spawn_task(ssrc_clone, rx).await;
 
-                        let data = SsrcStruct {
-                            handle: task,
-                            user_id: Some(user_id.unwrap().0),
-                            tx,
-                        };
+                        // let data = SsrcStruct {
+                        //     handle: task,
+                        //     user_id: Some(user_id.unwrap().0),
+                        //     tx,
+                        // };
 
-                        self.ssrc_hashmap.lock().await.insert(*ssrc, data);
+                        // self.ssrc_hashmap.lock().await.insert(*ssrc, data);
                     }
 
                     {
@@ -202,31 +225,8 @@ impl VoiceEventHandler for Receiver {
             Ctx::SpeakingUpdate(data) => {
                 // You can implement logic here which reacts to a user starting
                 // or stopping speaking.
-
-                // if !data.speaking {
-                //     {
-                //         if let Some(speaking) = self.is_speaking.lock().await.get_mut(&data.ssrc) {
-                //             *speaking = false;
-                //         }
-                //         if let Some(duration) = self.how_long.lock().await.get(&data.ssrc) {
-                //             *self.duration.lock().await.get_mut(&data.ssrc).unwrap() =
-                //                 duration.elapsed().as_millis();
-                //         }
-                //     }
-                // } else {
-                //     let mut res = self.is_speaking.lock().await;
-                //     if let Some(speaking) = res.get_mut(&data.ssrc) {
-                //         *speaking = true;
-                //     }
-                // }
             }
             Ctx::VoicePacket(data) => {
-                let res = self.is_speaking.lock().await;
-
-                // let is_speaking = res.get(&data.packet.ssrc);
-
-                // if let Some(is_speaking) = is_speaking {
-                //     if *is_speaking {
                 if let Some(child) = self
                     .ssrc_ffmpeg_hashmap
                     .lock()
@@ -316,7 +316,7 @@ impl VoiceEventHandler for Receiver {
                         Some(ok) => ok,
                         None => {
                             info!("tried to remove bot");
-                            self.leave_voice_channel().await;
+                            // self.leave_voice_channel().await;
                             return None;
                         }
                     };
@@ -335,7 +335,7 @@ impl VoiceEventHandler for Receiver {
                     );
                 }
 
-                self.leave_voice_channel().await;
+                // self.leave_voice_channel().await;
             }
 
             _ => {
@@ -357,6 +357,7 @@ fn spawn_ffmpeg(path: &str) -> Child {
         .args(["-ar", "48000"]) // sample rate
         .args(["-ac", "2"]) // channel count
         .args(["-i", "pipe:0"]) // Input name
+        .args(["-c:a", "libvorbis"])
         .args(["-async", "1"]) // this will input silence when there is no packets comming.
         // HOWEVER. It will not work if the packets do not have a timestamp attached to them. We can tell ffmpeg to attach its own timestamps and figure the timings by itself
         // We use the -use_wallclock_as_timestamps argument
@@ -434,70 +435,145 @@ pub async fn voice_state_update(
     old_state: Option<serenity::model::prelude::VoiceState>,
     new_state: serenity::model::prelude::VoiceState,
 ) {
-    if new_state.channel_id.is_none() {
-        // Someone left the channel
-        // TODO: Logic to stop recording if < x people
-
-        // if let Some(channel) = old_state.unwrap().channel_id {
-        //     if channel
-        //         .to_channel_cached(&ctx)
-        //         .unwrap()
-        //         .guild()
-        //         .unwrap()
-        //         .members(&ctx)
-        //         .await
-        //         .unwrap()
-        //         .len()
-        //         == 1
-        //     // just the bot is left
-        //     // TODO: fix that atrocity ^
-        //     // TODO: Other bots might be present in the channel. Don't count bots
-        //     {
-        //         leave_voice_channel(&ctx, new_state.guild_id.unwrap()).await;
-        //     }
-        // }
-
-        return;
-    }
-
-    if new_state.member.unwrap().user.bot {
-        // Ignore bots
-        info!("bot");
-        return;
-    }
-
-    if let Some(old) = old_state {
-        if new_state.channel_id.unwrap() == old.channel_id.unwrap() {
-            // An action happened that was NOT switching channels.
-            // We don't care about those
-
+    if let Some(member) = &new_state.member {
+        if member.user.bot {
+            // Ignore bots
+            info!("bot");
             return;
         }
+
+        let leave = match handle_no_people_in_channel(&new_state, &ctx, &old_state, member).await {
+            Some(value) => value,
+            None => true,
+        };
+
+        if let Some(old) = old_state {
+            if new_state.channel_id.is_some() {
+                if new_state.channel_id.unwrap() == old.channel_id.unwrap() {
+                    // An action happened that was NOT switching channels.
+                    // We don't care about those
+                    info!("An action happened that was NOT switching channels");
+                    return;
+                }
+            }
+        }
+
+        // The bot will join a voice channel with the following priorities
+        // 1) There must be at least 3 people in a channel
+        // 2) If 2 or more channels have the same count, will join the channel that has the highest average role (TODO)
+        // 3) If above is equal will join a channel with the oldest member
+
+        let (highest_channel_id, highest_channel_len) =
+            match get_channel_with_most_members(&ctx, &new_state).await {
+                Some(value) => value,
+                None => {
+                    leave_voice_channel(&ctx, new_state.guild_id.unwrap()).await;
+                    return;
+                }
+            };
+
+        if highest_channel_len > 0 {
+            let user_id = new_state.user_id;
+            connect_to_voice_channel(
+                &ctx,
+                new_state.guild_id.unwrap(),
+                highest_channel_id,
+                user_id.0,
+            )
+            .await;
+        } else if leave {
+            info!("Leave");
+            leave_voice_channel(&ctx, new_state.guild_id.unwrap()).await;
+        }
+    } else {
+        error!("No member in new_state");
+        panic!();
     }
+}
 
-    // The bot will join a voice channel with the following priorities
-    // 1) There must be at least 3 people in a channel
-    // 2) If 2 or more channels have the same count, will join the channel that has the highest average role (TODO)
-    // 3) If above is equal will join a channel with the oldest member
+// If no people are in the current channels we are safe to leave
+async fn handle_no_people_in_channel(
+    new_state: &serenity::model::prelude::VoiceState,
+    ctx: &Context,
+    old_state: &Option<serenity::model::prelude::VoiceState>,
+    member: &Member,
+) -> Option<bool> {
+    let mut leave = false;
+    if new_state.channel_id.is_none() {
+        // Someone left the channel
+        // Check if that person was the last HUMAN user to leave the channel
+        // NOTE: There can be other people in different channels. Check for this
 
+        if let Some(channel) = old_state.as_ref().unwrap().channel_id {
+            let members: Vec<Member> = channel
+                .to_channel_cached(ctx)
+                .unwrap()
+                .guild()
+                .unwrap()
+                .members(ctx)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|f| !f.user.bot)
+                .collect();
+
+            // No Human users left
+            if members.len() == 0
+            // just the bot is left
+            // TODO: fix that atrocity ^
+            {
+                info!("No more human users left. Leaving channel");
+                leave = true;
+                // leave_voice_channel(&ctx, new_state.guild_id.unwrap()).await;
+                return None;
+            }
+        }
+    }
+    // Check if the our application was kicked
+    else if member.user.id == ctx.cache.current_user_id() && new_state.channel_id.is_none() {
+        info!("bot was kicked/left");
+        // Bot Left/Disconnected from the channel
+        let guild_id = new_state.guild_id.unwrap();
+        leave = true;
+        leave_voice_channel(ctx, guild_id).await;
+    }
+    Some(leave)
+}
+
+async fn get_channel_with_most_members(
+    ctx: &Context,
+    new_state: &serenity::model::prelude::VoiceState,
+) -> Option<(ChannelId, usize)> {
+    let lock = get_lock_read(ctx).await;
+
+    let lock_guard = lock.read().await;
+    let afk_channel_id_option = lock_guard.get(&new_state.guild_id.unwrap().0).unwrap();
     let all_channels = ctx
         .cache
         .guild(new_state.guild_id.unwrap())
         .expect("cannot clone guild from cache")
         .channels;
-
     let mut highest_channel_id: ChannelId = ChannelId(0);
     let mut highest_channel_len: usize = 0;
-
     for (channel_id, guild_channel) in all_channels {
+        if let Some(afk_channel_id) = afk_channel_id_option {
+            // Ignore channels that are meant for afk
+            if *afk_channel_id == channel_id.0 {
+                info!("Guild has an afk channel with most members. Dont enter");
+                continue;
+            }
+        }
         match guild_channel {
             serenity::model::prelude::Channel::Guild(guild_guild_channel) => {
                 if let serenity::model::prelude::ChannelType::Voice = guild_guild_channel.kind {
-                    let count = match guild_guild_channel.members(&ctx).await {
-                        Ok(ok) => ok,
+                    let count = match guild_guild_channel.members(ctx).await {
+                        Ok(mut ok) => {
+                            ok.retain(|f| !f.user.bot);
+                            ok
+                        }
                         Err(_) => {
                             error!("This should not trigger");
-                            return;
+                            return None;
                         }
                     };
 
@@ -515,46 +591,112 @@ pub async fn voice_state_update(
             }
         }
     }
-
-    info!("highest channel id: {}", highest_channel_id);
-    info!("highest channel len: {}", highest_channel_len);
-
-    if highest_channel_len > 0 {
-        connect_to_voice_channel(&ctx, new_state.guild_id.unwrap(), highest_channel_id).await;
-    }
+    Some((highest_channel_id, highest_channel_len))
 }
 
-pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_id: ChannelId) {
+async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
+    let lock = {
+        let data_read = ctx.data.read().await;
+        data_read
+            .get::<MpmcChannels>()
+            .expect("Expected struct")
+            .clone()
+    };
+
+    let hash_map = lock.write().await;
+    let (s, r) = hash_map.get(&guild_id.0).expect("channel not innitialized");
+
+    handle_graceful_shutdown(s.clone()).await;
+
     let manager = songbird::get(ctx)
         .await
         .expect("Songbird Voice client placed in at initialisation.")
         .clone();
 
-    info!("CH {:?}", channel_id);
+    let _ = manager.remove(guild_id).await;
 
-    // Don't connect to a channel we are already in
-    // TODO: will have to re-register all the event handler + songbird might already be doing this for us
-    // {
-    //     // Bot is already in the channel we are trying to connect.
-    //     if let Some(result) = manager.get(guild_id) {
-    //         let channel = { result.lock().await.current_channel().unwrap() };
-    //         if channel == channel_id.into() {
-    //             info!("bot trying to connect to the same channel");
-    //             return;
-    //         }
-    //     }
-    // }
+    info!("Left the voice channel");
+}
+
+pub async fn connect_to_voice_channel(
+    ctx: &Context,
+    guild_id: GuildId,
+    channel_id: ChannelId,
+    user_id: u64,
+) {
+    let manager = songbird::get(ctx)
+        .await
+        .expect("Songbird Voice client placed in at initialisation.")
+        .clone();
 
     if let Some(arc_call) = manager.get(guild_id) {
         // alreday have the call dont rejoin
-        info!("already in channel");
+        let ch = arc_call.lock().await.current_channel().unwrap();
+        if ch.0 != channel_id.0 {
+            info!("Switching channels");
+            join_ch(manager, guild_id, channel_id, ctx, user_id, Some(ch.0)).await;
+        } else {
+            info!("already in channel");
+        }
     } else {
         // join channel
 
-        let (handler_lock, res) = manager.join(guild_id, channel_id).await;
-        match res {
-            Ok(_) => {
-                info!("Joined {}", channel_id);
+        join_ch(manager, guild_id, channel_id, ctx, user_id, None).await;
+    }
+}
+
+async fn join_ch(
+    manager: Arc<songbird::Songbird>,
+    guild_id: GuildId,
+    channel_id: ChannelId,
+    ctx: &Context,
+    user_id: u64,
+    old_channel: Option<u64>,
+) {
+    let lock = {
+        let data_read = ctx.data.read().await;
+        data_read
+            .get::<MpmcChannels>()
+            .expect("Expected struct")
+            .clone()
+    };
+
+    let mut hash_map = lock.write().await;
+    let channel = {
+        let result = match hash_map.get(&guild_id.0) {
+            Some(ok) => {
+                info!("channels already exists");
+
+                let s = ok.0.clone();
+                handle_graceful_shutdown(s).await;
+
+                ok
+            }
+            None => {
+                info!("new channels");
+                let (s, r) = tokio::sync::broadcast::channel::<i32>(10);
+                hash_map.insert(guild_id.0, (s, r));
+
+                hash_map.get(&guild_id.0).unwrap()
+            }
+        };
+
+        (result.0.clone(), result.0.subscribe())
+    };
+
+    let (handler_lock, res) = manager.join(guild_id, channel_id).await;
+    match res {
+        Ok(_) => {
+            info!("Joined {}", channel_id);
+
+            if let Some(old_ch) = old_channel {
+                // switching channels. Don't re-register. Cleanup
+                info!("Clean up switching chanels");
+
+                // hash_map
+                //     .remove(&guild_id.0)
+                //     .expect("Expected key from old channel when switching channels");
+            } else {
                 let mut handler = handler_lock.lock().await;
                 // let res = handler.join(channel_id).await;
                 // match res {
@@ -567,7 +709,7 @@ pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_
                 // handler.remove_all_global_events();
 
                 let ctx1 = Arc::new(ctx.clone());
-                let receiver = Receiver::new(ctx1, guild_id, channel_id).await;
+                let receiver = Receiver::new(ctx1, guild_id, channel_id, Arc::new(channel)).await;
 
                 handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
 
@@ -582,10 +724,28 @@ pub async fn connect_to_voice_channel(ctx: &Context, guild_id: GuildId, channel_
 
                 handler.add_global_event(CoreEvent::ClientDisconnect.into(), receiver.clone());
             }
-            Err(err) => {
-                manager.remove(guild_id).await.unwrap();
-                panic!("cannot join channel 2: {}", err);
-            }
         }
+        Err(err) => {
+            manager.remove(guild_id).await.unwrap();
+            panic!("cannot join channel 2: {}", err);
+        }
+    }
+}
+
+async fn handle_graceful_shutdown(s: tokio::sync::broadcast::Sender<i32>) {
+    // Termination signal
+    s.send(1).unwrap();
+
+    // Subscribe for a response
+    let mut r1 = s.subscribe();
+
+    // Get response
+    let res = r1.recv().await.unwrap();
+
+    if res == 2 {
+        info!("Response received, shutting down")
+    } else {
+        error!("RES IS :{}", res);
+        panic!();
     }
 }

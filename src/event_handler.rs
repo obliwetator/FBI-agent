@@ -1,5 +1,5 @@
 // use std::env;
-#![allow(unused_variables)]
+
 use std::collections::HashMap;
 
 use serenity::{
@@ -7,6 +7,7 @@ use serenity::{
     model::{
         channel::Message,
         gateway::Ready,
+        guild::Guild,
         prelude::{
             automod::{ActionExecution, Rule},
             GuildChannel, GuildId, GuildScheduledEventUserAddEvent,
@@ -19,8 +20,9 @@ use serenity::{
 };
 
 use sqlx::{Pool, Postgres};
+use tracing::info;
 
-use crate::{commands, database, events};
+use crate::{commands, database, events, get_lock_read};
 
 pub struct Handler {
     pub(crate) database: Pool<Postgres>,
@@ -56,6 +58,25 @@ impl EventHandler for Handler {
     async fn auto_moderation_action_execution(&self, _ctx: Context, _execution: ActionExecution) {}
 
     async fn cache_ready(&self, ctx: Context, guilds: Vec<serenity::model::id::GuildId>) {
+        let guild_cached: &Vec<Guild> = &guilds
+            .iter()
+            .map(|guild| {
+                let x = guild.to_guild_cached(&ctx).unwrap();
+                x
+            })
+            .collect();
+        let lock = get_lock_read(&ctx).await;
+
+        {
+            for ele in guild_cached {
+                if let Some(channel_id) = ele.afk_channel_id {
+                    lock.write().await.insert(ele.id.0, Some(channel_id.0));
+                } else {
+                    lock.write().await.insert(ele.id.0, None);
+                }
+            }
+        }
+
         let _ = database::update_info(self, &ctx, &guilds).await;
         let _ = database::channels::update_guilds(self, &ctx, &guilds).await;
         let _ = database::channels::update_guild_channels(self, &ctx, &guilds).await;
