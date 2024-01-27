@@ -421,7 +421,7 @@ impl EventHandler for Handler {
     // TODO
     async fn presence_update(&self, _ctx: Context, _new_data: serenity::model::prelude::Presence) {}
     async fn ready(&self, ctx: Context, ready: Ready) {
-        println!("{} is connected!", ready.user.name);
+        info!("{} is connected!", ready.user.name);
 
         let guild_id = GuildId(362257054829641758);
 
