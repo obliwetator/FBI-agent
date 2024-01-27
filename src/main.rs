@@ -1,13 +1,13 @@
 // use std::env;
 #![allow(unused_variables)]
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use serenity::{model::channel::Message, prelude::*, CacheAndHttp, Result as SerenityResult};
 use songbird::{driver::DecodeMode, Config, SerenityInit};
 use sqlx::postgres::PgPoolOptions;
 use tonic::transport::Server;
-use tracing::Level;
-use tracing_subscriber::FmtSubscriber;
+use tracing::info;
+use tracing_subscriber::prelude::*;
 
 use crate::{
     event_handler::Handler,
@@ -41,8 +41,10 @@ impl TypeMapKey for MpmcChannels {
             HashMap<
                 u64,
                 (
+                    // Handler
                     tokio::sync::broadcast::Sender<i32>,
-                    tokio::sync::broadcast::Receiver<i32>,
+                    // Receiver
+                    tokio::sync::broadcast::Sender<i32>,
                 ),
             >,
         >,
@@ -69,20 +71,22 @@ pub async fn get_lock_read(ctx: &Context) -> Arc<RwLock<HashMap<u64, Option<u64>
 
 #[tokio::main]
 async fn main() {
-    // install global collector configured based on RUST_LOG env var.
-    let subscriber = FmtSubscriber::builder()
-        // .with_thread_names(true)
-        // .with_file(true)
-        // .with_target(true)
-        // .with_line_number(true)
-        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
-        // will be written to stdout.
-        .with_max_level(Level::INFO)
-        .pretty()
-        // completes the builder.
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing_subscriber::registry()
+        // add the console layer to the subscriber
+        .with(
+            console_subscriber::ConsoleLayer::builder()
+                .server_addr(([127, 0, 0, 1], 5555))
+                .retention(Duration::from_secs(180))
+                .spawn(),
+        )
+        // add other layers...
+        .with(
+            tracing_subscriber::fmt::layer()
+                .pretty()
+                .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
+        )
+        // .with(...)
+        .init();
 
     tracing::log::info!("yak shaving completed.");
     // create relevant folders
@@ -164,7 +168,7 @@ async fn main() {
 
         let jammer = MyJammer::new(custom);
 
-        println!("GreeterServer listening on {}", addr);
+        info!("GreeterServer listening on {}", addr);
 
         Server::builder()
             .add_service(JammerServer::new(jammer))
