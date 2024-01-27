@@ -1,10 +1,8 @@
 use serenity::{
-    model::prelude::interaction::{
-        application_command::ApplicationCommandInteraction, Interaction, InteractionResponseType,
-    },
-    prelude::*,
+    all::{CommandInteraction, Interaction},
+    builder::{CreateInteractionResponse, CreateInteractionResponseMessage},
+    client::Context,
 };
-use songbird::input::Restartable;
 
 use crate::event_handler::Handler;
 
@@ -13,7 +11,7 @@ use super::voice::RECORDING_FILE_PATH;
 pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Interaction) {
     match interaction {
         Interaction::Ping(_) => todo!(),
-        Interaction::ApplicationCommand(application_command) => {
+        Interaction::Command(application_command) => {
             let content = match application_command.data.name.as_str() {
                 "help" => ":(".to_string(),
                 "play" => handle_play_audio(&application_command, &ctx, "").await,
@@ -24,44 +22,40 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
             };
 
             if let Err(why) = application_command
-                .create_interaction_response(&ctx.http, |response| {
-                    response
-                        .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|message| message.content(content))
-                })
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new().content(content),
+                    ),
+                )
                 .await
             {
                 println!("Cannot respond to slash command: {}", why);
             }
         }
-        Interaction::MessageComponent(_) => todo!(),
+        Interaction::Component(_) => todo!(),
         Interaction::Autocomplete(_) => todo!(),
-        Interaction::ModalSubmit(_) => todo!(),
+        Interaction::Modal(_) => todo!(),
+        _ => todo!(),
     }
 }
 
 pub async fn handle_play_audio(
-    application_command: &ApplicationCommandInteraction,
+    application_command: &CommandInteraction,
     ctx: &Context,
     file_name: &str,
 ) -> String {
     let manager = songbird::get(ctx).await.unwrap();
-
     // TODO: This does not return and error if the wrong file path is given?
-    let result = Restartable::ffmpeg(
-        format!(
-            "{}{}",
-            RECORDING_FILE_PATH,
-            "/362257054829641758/2022/December/1670620473631-161172393719496704-QazZ.ogg"
-        ),
-        false,
-    )
-    .await
-    .unwrap();
+    let result = songbird::input::File::new(format!(
+        "{}{}",
+        RECORDING_FILE_PATH,
+        "/362257054829641758/2022/December/1670620473631-161172393719496704-QazZ.ogg"
+    ));
 
     let input = songbird::input::Input::from(result);
     let handler = manager.get(application_command.guild_id.unwrap()).unwrap();
-    let handler_lock = handler.lock().await.enqueue_source(input);
+    let handler_lock = handler.lock().await.enqueue(input.into()).await;
     let _ = handler_lock.set_volume(0.5);
 
     "jamming".to_string()

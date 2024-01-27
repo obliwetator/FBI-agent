@@ -3,6 +3,7 @@ use chrono::Datelike;
 use serenity::{
     async_trait,
     client::Context,
+    http::CacheHttp,
     model::{
         id::{ChannelId, GuildId},
         prelude::Member,
@@ -11,6 +12,7 @@ use serenity::{
 };
 use songbird::{
     model::payload::{ClientDisconnect, Speaking},
+    packet::Packet,
     CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler,
 };
 use sqlx::{Pool, Postgres};
@@ -247,7 +249,8 @@ impl VoiceEventHandler for Receiver {
                     .ctx_main
                     .cache
                     .member(self.guild_id, user_id.unwrap().0)
-                    .unwrap();
+                    .unwrap()
+                    .to_owned();
 
                 if member.user.bot {
                     info!("is a bot");
@@ -326,58 +329,87 @@ impl VoiceEventHandler for Receiver {
                     }
                 }
             }
-            Ctx::SpeakingUpdate(data) => {
-                // You can implement logic here which reacts to a user starting
-                // or stopping speaking.
-            }
-            Ctx::VoicePacket(data) => {
+
+            Ctx::RtpPacket(packet) => {
+                let rtp = packet.rtp();
                 if let Some(child) = self
                     .ssrc_ffmpeg_hashmap
                     .write()
                     .await
-                    .get_mut(&data.packet.ssrc)
+                    .get_mut(&rtp.get_ssrc())
                 {
-                    if let Some(audio_i16) = data.audio {
-                        //     info!(
-                        // 	"Audio packet sequence {:05} has {:04} bytes (decompressed from {}), SSRC {}",
-                        // 	data.packet.sequence.0,
-                        // 	audio_i16.len() * std::mem::size_of::<i16>(),
-                        // 	data.packet.payload.len(),
-                        // 	data.packet.ssrc,
-                        // );
+                    let mut buffer = self.buffer.lock().await;
+                    let res = buffer.get_mut(&rtp.get_ssrc()).unwrap();
+                    if let Some(stdin) = child.stdin.as_mut() {
+                        let mut result: Vec<u8> = Vec::new();
+                        let _ = result.write_all(rtp.payload()).await;
 
-                        // {
-                        //     let mut lock = self.size.lock().await;
-                        //     let value = *lock.get(&data.packet.ssrc).unwrap();
-                        //     // drop(lock);
-                        //     *lock.get_mut(&data.packet.ssrc).unwrap() = audio_i16.len() + value;
+                        // for &n in audio_i16 {
+                        //     // TODO: Use buffer
+                        //     let _ = result.write_i16_le(n).await;
                         // }
 
-                        let mut buffer = self.buffer.lock().await;
-                        let res = buffer.get_mut(&data.packet.ssrc).unwrap();
-                        if let Some(stdin) = child.stdin.as_mut() {
-                            let mut result: Vec<u8> = Vec::new();
-
-                            for &n in audio_i16 {
-                                // TODO: Use buffer
-                                let _ = result.write_i16_le(n).await;
+                        match stdin.write_all(&result).await {
+                            Ok(_) => {}
+                            Err(err) => {
+                                error!("Could not write to stdin: {}", err)
                             }
-
-                            match stdin.write_all(&result).await {
-                                Ok(_) => {}
-                                Err(err) => {
-                                    error!("Could not write to stdin: {}", err)
-                                }
-                            };
-                        } else {
-                            info!("no stdin");
-                        }
+                        };
                     } else {
-                        info!("No audio");
+                        info!("no stdin");
                     }
                 } else {
                     error!("No child");
                 }
+            }
+            Ctx::VoiceTick(data) => {
+                // if let Some(child) = self
+                //     .ssrc_ffmpeg_hashmap
+                //     .write()
+                //     .await
+                //     .get_mut(&data.packet.ssrc)
+                // {
+                //     if let Some(audio_i16) = data.audio {
+                //         //     info!(
+                //         // 	"Audio packet sequence {:05} has {:04} bytes (decompressed from {}), SSRC {}",
+                //         // 	data.packet.sequence.0,
+                //         // 	audio_i16.len() * std::mem::size_of::<i16>(),
+                //         // 	data.packet.payload.len(),
+                //         // 	data.packet.ssrc,
+                //         // );
+
+                //         // {
+                //         //     let mut lock = self.size.lock().await;
+                //         //     let value = *lock.get(&data.packet.ssrc).unwrap();
+                //         //     // drop(lock);
+                //         //     *lock.get_mut(&data.packet.ssrc).unwrap() = audio_i16.len() + value;
+                //         // }
+
+                //         let mut buffer = self.buffer.lock().await;
+                //         let res = buffer.get_mut(&data.packet.ssrc).unwrap();
+                //         if let Some(stdin) = child.stdin.as_mut() {
+                //             let mut result: Vec<u8> = Vec::new();
+
+                //             for &n in audio_i16 {
+                //                 // TODO: Use buffer
+                //                 let _ = result.write_i16_le(n).await;
+                //             }
+
+                //             match stdin.write_all(&result).await {
+                //                 Ok(_) => {}
+                //                 Err(err) => {
+                //                     error!("Could not write to stdin: {}", err)
+                //                 }
+                //             };
+                //         } else {
+                //             info!("no stdin");
+                //         }
+                //     } else {
+                //         info!("No audio");
+                //     }
+                // } else {
+                //     error!("No child");
+                // }
                 //     } else {
                 //     }
                 // }
@@ -492,7 +524,6 @@ impl VoiceEventHandler for Receiver {
 
                 // self.leave_voice_channel().await;
             }
-
             _ => {
                 // We won't be registering this struct for any more event classes.
                 unimplemented!()
@@ -549,7 +580,11 @@ async fn create_path(
 
     let dir_path = format!(
         "{}/{}/{}/{}/{}/",
-        &RECORDING_FILE_PATH, guild_id.0, channel_id.0, year, month
+        &RECORDING_FILE_PATH,
+        guild_id.get(),
+        channel_id.get(),
+        year,
+        month
     );
 
     let file_name = format!(
@@ -568,7 +603,12 @@ async fn create_path(
     }
     let combined_path = format!(
         "{}/{}/{}/{}/{}/{}",
-        &RECORDING_FILE_PATH, guild_id.0, channel_id.0, year, month, file_name
+        &RECORDING_FILE_PATH,
+        guild_id.get(),
+        channel_id.get(),
+        year,
+        month,
+        file_name
     );
 
     // Try to create the dir in case it does not exist
@@ -587,8 +627,8 @@ async fn create_path(
 	(file_name, guild_id, channel_id, user_id, year, month, start_ts, end_ts, state) VALUES 
 	($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         file_name,
-        guild_id.0 as i64,
-        channel_id.0 as i64,
+        guild_id.get() as i64,
+        channel_id.get() as i64,
         user_id as i64,
         now.year(),
         now.month() as i32,
@@ -661,7 +701,7 @@ pub async fn voice_state_update(
                 &ctx,
                 new_state.guild_id.unwrap(),
                 highest_channel_id,
-                user_id.0,
+                user_id.get(),
             )
             .await;
         } else if leave {
@@ -688,17 +728,14 @@ async fn handle_no_people_in_channel(
         // NOTE: There can be other people in different channels. Check for this
 
         if let Some(channel) = old_state.as_ref().unwrap().channel_id {
-            let members: Vec<Member> = channel
-                .to_channel_cached(ctx)
+            let guild = channel
+                .to_channel_cached(&ctx.cache().unwrap())
                 .unwrap()
-                .guild()
+                .guild(&ctx.cache().unwrap())
                 .unwrap()
-                .members(ctx)
-                .await
-                .unwrap()
-                .into_iter()
-                .filter(|f| !f.user.bot)
-                .collect();
+                .to_owned();
+            let vec = guild.members(&ctx.http, None, None).await;
+            let members: Vec<Member> = vec.unwrap().into_iter().filter(|f| !f.user.bot).collect();
 
             // No Human users left
             if members.len() == 0
@@ -713,7 +750,7 @@ async fn handle_no_people_in_channel(
         }
     }
     // Check if the our application was kicked
-    else if member.user.id == ctx.cache.current_user_id() && new_state.channel_id.is_none() {
+    else if member.user.id == ctx.cache.current_user().id && new_state.channel_id.is_none() {
         info!("bot was kicked/left");
         // Bot Left/Disconnected from the channel
         let guild_id = new_state.guild_id.unwrap();
@@ -730,47 +767,37 @@ async fn get_channel_with_most_members(
     let lock = get_lock_read(ctx).await;
 
     let lock_guard = lock.read().await;
-    let afk_channel_id_option = lock_guard.get(&new_state.guild_id.unwrap().0).unwrap();
-    let all_channels = ctx
+    let afk_channel_id_option = lock_guard.get(&new_state.guild_id.unwrap().get()).unwrap();
+    let all_channels = &ctx
         .cache
         .guild(new_state.guild_id.unwrap())
         .expect("cannot clone guild from cache")
         .channels;
-    let mut highest_channel_id: ChannelId = ChannelId(0);
+    let mut highest_channel_id: ChannelId = ChannelId::new(0);
     let mut highest_channel_len: usize = 0;
     for (channel_id, guild_channel) in all_channels {
         if let Some(afk_channel_id) = afk_channel_id_option {
             // Ignore channels that are meant for afk
-            if *afk_channel_id == channel_id.0 {
+            if *afk_channel_id == channel_id.get() {
                 info!("Ignore AFK channel");
                 continue;
             }
         }
-        match guild_channel {
-            serenity::model::prelude::Channel::Guild(guild_guild_channel) => {
-                if let serenity::model::prelude::ChannelType::Voice = guild_guild_channel.kind {
-                    let count = match guild_guild_channel.members(ctx).await {
-                        Ok(mut ok) => {
-                            ok.retain(|f| !f.user.bot);
-                            ok
-                        }
-                        Err(_) => {
-                            error!("This should not trigger");
-                            return None;
-                        }
-                    };
-
-                    if count.len() > highest_channel_len {
-                        highest_channel_len = count.len();
-                        highest_channel_id = guild_guild_channel.id;
-                    }
+        if let serenity::model::prelude::ChannelType::Voice = guild_channel.kind {
+            let count = match guild_channel.members(ctx) {
+                Ok(mut ok) => {
+                    ok.retain(|f| !f.user.bot);
+                    ok
                 }
-            }
-            serenity::model::prelude::Channel::Private(ok) => {}
-            serenity::model::prelude::Channel::Category(ok) => {}
-            _ => {
-                error!("unkown channel type");
-                unimplemented!()
+                Err(_) => {
+                    error!("This should not trigger");
+                    return None;
+                }
+            };
+
+            if count.len() > highest_channel_len {
+                highest_channel_len = count.len();
+                highest_channel_id = guild_channel.id;
             }
         }
     }
@@ -788,7 +815,9 @@ async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
         };
 
         let hash_map = lock.write().await;
-        let (handler, receiver) = hash_map.get(&guild_id.0).expect("channel not innitialized");
+        let (handler, receiver) = hash_map
+            .get(&guild_id.get())
+            .expect("channel not innitialized");
 
         handle_graceful_shutdown(handler.clone(), receiver.clone(), 1).await;
     }
@@ -804,9 +833,9 @@ async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
         };
         let mut hash_map = lock.write().await;
 
-        if hash_map.contains_key(&guild_id.0) {
+        if hash_map.contains_key(&guild_id.get()) {
             // Clean the channels
-            let _ = hash_map.remove(&guild_id.0);
+            let _ = hash_map.remove(&guild_id.get());
         };
     }
 
@@ -835,7 +864,8 @@ pub async fn connect_to_voice_channel(
     if let Some(arc_call) = manager.get(guild_id) {
         // alreday have the call dont rejoin
         let ch = arc_call.lock().await.current_channel().unwrap();
-        if ch.0 != channel_id.0 {
+
+        if ch.0.get() as u64 != channel_id.get() {
             info!("Switching channels");
             join_ch(
                 pool,
@@ -844,7 +874,7 @@ pub async fn connect_to_voice_channel(
                 channel_id,
                 ctx,
                 user_id,
-                Some(ch.0),
+                Some(ch.0.get()),
             )
             .await;
         } else {
@@ -876,7 +906,7 @@ async fn join_ch(
 
     let mut hash_map = lock.write().await;
     let channel = {
-        let result = match hash_map.get(&guild_id.0) {
+        let result = match hash_map.get(&guild_id.get()) {
             Some(ok) => {
                 info!("channels already exists");
 
@@ -890,17 +920,17 @@ async fn join_ch(
                 info!("new channels");
                 let (sender_for_handler, _) = tokio::sync::broadcast::channel::<i32>(10);
                 let (sender_for_receiver, _) = tokio::sync::broadcast::channel::<i32>(10);
-                hash_map.insert(guild_id.0, (sender_for_handler, sender_for_receiver));
+                hash_map.insert(guild_id.get(), (sender_for_handler, sender_for_receiver));
 
-                hash_map.get(&guild_id.0).unwrap()
+                hash_map.get(&guild_id.get()).unwrap()
             }
         };
         (result.0.clone(), result.1.clone())
     };
 
-    let (handler_lock, res) = manager.join(guild_id, channel_id).await;
-    match res {
-        Ok(_) => {
+    let result_handler_lock = manager.join(guild_id, channel_id).await;
+    match result_handler_lock {
+        Ok(handler_lock) => {
             info!("Joined {}", channel_id);
 
             if let Some(old_ch) = old_channel {
@@ -928,16 +958,16 @@ async fn join_ch(
 
                 handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
 
-                handler.add_global_event(CoreEvent::SpeakingUpdate.into(), receiver.clone());
+                handler.add_global_event(CoreEvent::VoiceTick.into(), receiver.clone());
 
-                handler.add_global_event(CoreEvent::VoicePacket.into(), receiver.clone());
+                handler.add_global_event(CoreEvent::RtpPacket.into(), receiver.clone());
 
                 handler.add_global_event(CoreEvent::RtcpPacket.into(), receiver.clone());
 
+                handler.add_global_event(CoreEvent::ClientDisconnect.into(), receiver.clone());
+
                 // handler.add_global_event(CoreEvent::DriverConnect.into(), receiver.clone());
                 // handler.add_global_event(CoreEvent::DriverDisconnect.into(), receiver.clone());
-
-                handler.add_global_event(CoreEvent::ClientDisconnect.into(), receiver.clone());
             }
         }
         Err(err) => {

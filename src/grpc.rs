@@ -11,7 +11,7 @@ use tracing::info;
 use crate::Custom;
 
 use serenity::prelude::{RwLock, TypeMap};
-use songbird::{input::Restartable, SongbirdKey};
+use songbird::SongbirdKey;
 
 use crate::events::voice::CLIPS_FILE_PATH;
 
@@ -41,11 +41,10 @@ impl Jammer for MyJammer {
 
         let guild = match self
             .data_cache
-            .cache_http
             .cache
-            .guild(GuildId(data.guild_id.try_into().unwrap()))
+            .guild(GuildId::new(data.guild_id.try_into().unwrap()))
         {
-            Some(ok) => ok,
+            Some(ok) => ok.to_owned(),
             None => {
                 let reply = JamResponse {
                     resp: JamResponseEnum::Unkown.into(),
@@ -55,43 +54,38 @@ impl Jammer for MyJammer {
             }
         };
 
-        let channels = guild.channels;
+        let channels = &guild.channels;
 
-        for (key, channel) in channels {
-            if let serenity::model::prelude::Channel::Guild(guild_channel) = channel {
-                match guild_channel.kind {
-                    serenity::model::prelude::ChannelType::Text => {}
-                    // serenity::model::prelude::ChannelType::Private => todo!(),
-                    serenity::model::prelude::ChannelType::Voice => {
-                        let res = guild_channel
-                            .members(&self.data_cache.cache_http.cache)
-                            .await
-                            .unwrap();
-                        for (index, member) in res.iter().enumerate() {
-                            if member.user.id == 877617434029350972 {
-                                info!(
-                                    "Ladies and gentlemen, We got him in c {}",
-                                    guild_channel.id.0
-                                );
+        for (key, guild_channel) in channels {
+            match guild_channel.kind {
+                serenity::model::prelude::ChannelType::Text => {}
+                // serenity::model::prelude::ChannelType::Private => todo!(),
+                serenity::model::prelude::ChannelType::Voice => {
+                    let res = guild_channel.members(&self.data_cache.cache).unwrap();
+                    for (index, member) in res.iter().enumerate() {
+                        if member.user.id == 877617434029350972 {
+                            info!(
+                                "Ladies and gentlemen, We got him in c {}",
+                                guild_channel.id.get()
+                            );
 
-                                handle_play_audio_to_channel(
-                                    data.guild_id,
-                                    &data.clip_name,
-                                    self.data_cache.data.clone(),
-                                )
-                                .await;
+                            handle_play_audio_to_channel(
+                                data.guild_id,
+                                &data.clip_name,
+                                self.data_cache.data.clone(),
+                            )
+                            .await;
 
-                                let reply = JamResponse {
-                                    resp: JamResponseEnum::Ok.into(),
-                                };
-                                return Ok(Response::new(reply));
-                            }
+                            let reply = JamResponse {
+                                resp: JamResponseEnum::Ok.into(),
+                            };
+                            return Ok(Response::new(reply));
                         }
-
-                        // info!("members: {:#?}", res);
                     }
-                    _ => {}
+
+                    // info!("members: {:#?}", res);
                 }
+                _ => {}
             }
         }
 
@@ -108,12 +102,11 @@ async fn handle_play_audio_to_channel(id: i64, clip_name: &str, data: Arc<RwLock
 
     // TODO: This does not return and error if the wrong file path is given?
     info!(" Clips to play : {}/{}.ogg", CLIPS_FILE_PATH, clip_name);
-    let result = Restartable::ffmpeg(format!("{}/{}.ogg", CLIPS_FILE_PATH, clip_name), false)
-        .await
-        .unwrap();
+    let result = songbird::input::File::new(format!("{}/{}.ogg", CLIPS_FILE_PATH, clip_name));
 
     let input = songbird::input::Input::from(result);
-    let handler = manager.get(GuildId(id.try_into().unwrap())).unwrap();
-    let handler_lock = handler.lock().await.enqueue_source(input);
-    let _ = handler_lock.set_volume(0.5);
+    let handler = manager.get(GuildId::new(id.try_into().unwrap())).unwrap();
+    let driver = &mut handler.lock().await;
+    let handler_lock = driver.enqueue_input(input);
+    let _ = handler_lock.await.set_volume(0.5);
 }

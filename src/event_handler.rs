@@ -11,8 +11,8 @@ use serenity::{
         prelude::{
             automod::{ActionExecution, Rule},
             GuildChannel, GuildId, GuildScheduledEventUserAddEvent,
-            GuildScheduledEventUserRemoveEvent, PartialGuildChannel, ScheduledEvent, StageInstance,
-            StickerId, ThreadListSyncEvent, ThreadMember, ThreadMembersUpdateEvent,
+            GuildScheduledEventUserRemoveEvent, ScheduledEvent, StageInstance, StickerId,
+            ThreadListSyncEvent, ThreadMember, ThreadMembersUpdateEvent,
         },
         sticker::Sticker,
     },
@@ -22,7 +22,7 @@ use serenity::{
 use sqlx::{Pool, Postgres};
 use tracing::info;
 
-use crate::{commands, database, events, get_lock_read};
+use crate::{database, events, get_lock_read};
 
 pub struct Handler {
     pub(crate) database: Pool<Postgres>,
@@ -30,13 +30,6 @@ pub struct Handler {
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn application_command_permissions_update(
-        &self,
-        _ctx: Context,
-        _permission: serenity::model::prelude::command::CommandPermission,
-    ) {
-    }
-
     /// Dispatched when an auto moderation rule was created.
     ///
     /// Provides said rule's data.
@@ -61,7 +54,7 @@ impl EventHandler for Handler {
         let guild_cached: &Vec<Guild> = &guilds
             .iter()
             .map(|guild| {
-                let x = guild.to_guild_cached(&ctx).unwrap();
+                let x = guild.to_guild_cached(&ctx).unwrap().to_owned();
                 x
             })
             .collect();
@@ -69,10 +62,12 @@ impl EventHandler for Handler {
 
         {
             for ele in guild_cached {
-                if let Some(channel_id) = ele.afk_channel_id {
-                    lock.write().await.insert(ele.id.0, Some(channel_id.0));
+                if let Some(channel_id) = &ele.afk_metadata {
+                    lock.write()
+                        .await
+                        .insert(ele.id.get(), Some(channel_id.afk_channel_id.get()));
                 } else {
-                    lock.write().await.insert(ele.id.0, None);
+                    lock.write().await.insert(ele.id.get(), None);
                 }
             }
         }
@@ -150,53 +145,12 @@ impl EventHandler for Handler {
         // }
     }
 
-    async fn channel_create(
-        &self,
-        _ctx: Context,
-        _channel: &serenity::model::channel::GuildChannel,
-    ) {
-        events::channels::channel_create().await;
-    }
-
-    async fn category_create(
-        &self,
-        _ctx: Context,
-        _category: &serenity::model::channel::ChannelCategory,
-    ) {
-        events::channels::category_create().await;
-    }
-
-    async fn category_delete(
-        &self,
-        _ctx: Context,
-        _category: &serenity::model::channel::ChannelCategory,
-    ) {
-        events::channels::category_delete().await;
-    }
-
-    async fn channel_delete(
-        &self,
-        _ctx: Context,
-        _channel: &serenity::model::channel::GuildChannel,
-    ) {
-        events::channels::channel_delete().await;
-    }
-
     async fn channel_pins_update(
         &self,
         _ctx: Context,
         _pin: serenity::model::event::ChannelPinsUpdateEvent,
     ) {
         events::channels::channel_pins_update().await;
-    }
-
-    async fn channel_update(
-        &self,
-        _ctx: Context,
-        _old: Option<serenity::model::channel::Channel>,
-        _new: serenity::model::channel::Channel,
-    ) {
-        events::channels::channel_update().await;
     }
 
     async fn guild_ban_addition(
@@ -221,7 +175,7 @@ impl EventHandler for Handler {
         &self,
         _ctx: Context,
         _guild: serenity::model::guild::Guild,
-        _is_new: bool,
+        _is_new: Option<bool>,
     ) {
         events::guilds::guild_create(self, _ctx, _guild, _is_new).await;
     }
@@ -280,15 +234,6 @@ impl EventHandler for Handler {
         .await;
     }
 
-    async fn guild_member_update(
-        &self,
-        _ctx: Context,
-        _old_if_available: Option<serenity::model::guild::Member>,
-        _new: serenity::model::guild::Member,
-    ) {
-        events::guilds::guild_member_update(self, _ctx, _old_if_available, _new).await;
-    }
-
     async fn guild_members_chunk(
         &self,
         _ctx: Context,
@@ -337,8 +282,6 @@ impl EventHandler for Handler {
         _current_state: HashMap<StickerId, Sticker>,
     ) {
     }
-
-    async fn guild_unavailable(&self, _ctx: Context, _guild_id: serenity::model::id::GuildId) {}
 
     async fn guild_update(
         &self,
@@ -423,17 +366,17 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
 
-        let guild_id = GuildId(362257054829641758);
+        let guild_id = GuildId::new(362257054829641758);
 
-        let commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
-            commands
-                .create_application_command(|command| {
-                    commands::play_clip_command::register(command)
-                })
-                .create_application_command(|command| commands::clip_it::register(command))
-        })
-        .await
-        .unwrap();
+        // let commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
+        //     commands
+        //         .create_application_command(|command| {
+        //             commands::play_clip_command::register(command)
+        //         })
+        //         .create_application_command(|command| commands::clip_it::register(command))
+        // })
+        // .await
+        // .unwrap();
 
         // serenity::model::prelude::command::Command::create_global_application_command(
         //     &ctx.http,
@@ -447,24 +390,17 @@ impl EventHandler for Handler {
     async fn resume(&self, _ctx: Context, _: serenity::model::event::ResumedEvent) {}
 
     // TODO
-    async fn shard_stage_update(
-        &self,
-        _ctx: Context,
-        _: serenity::client::bridge::gateway::event::ShardStageUpdateEvent,
-    ) {
+    async fn shard_stage_update(&self, _ctx: Context, _: serenity::gateway::ShardStageUpdateEvent) {
     }
 
     // TODO
     async fn typing_start(&self, _ctx: Context, _: serenity::model::event::TypingStartEvent) {}
 
     // TODO
-    async fn unknown(&self, _ctx: Context, _name: String, _raw: serde_json::Value) {}
-
-    // TODO
     async fn user_update(
         &self,
         _ctx: Context,
-        _old_data: serenity::model::prelude::CurrentUser,
+        _old_data: Option<serenity::model::prelude::CurrentUser>,
         _new: serenity::model::prelude::CurrentUser,
     ) {
         println!("bot Updated. Old: {:#?}, New: {:#?}", _old_data, _new);
@@ -496,11 +432,7 @@ impl EventHandler for Handler {
     ) {
     }
 
-    async fn interaction_create(
-        &self,
-        _ctx: Context,
-        _interaction: serenity::model::prelude::interaction::Interaction,
-    ) {
+    async fn interaction_create(&self, _ctx: Context, _interaction: serenity::all::Interaction) {
         events::interactions::interaction_create(self, _ctx, _interaction).await;
     }
 
@@ -557,16 +489,6 @@ impl EventHandler for Handler {
     ///
     /// Provides the thread.
     async fn thread_create(&self, _ctx: Context, _thread: GuildChannel) {}
-
-    /// Dispatched when a thread is updated.
-    ///
-    /// Provides the updated thread.
-    async fn thread_update(&self, _ctx: Context, _thread: GuildChannel) {}
-
-    /// Dispatched when a thread is deleted.
-    ///
-    /// Provides the partial deleted thread.
-    async fn thread_delete(&self, _ctx: Context, _thread: PartialGuildChannel) {}
 
     /// Dispatched when the current user gains access to a channel
     ///

@@ -2,7 +2,10 @@
 #![allow(unused_variables)]
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use serenity::{model::channel::Message, prelude::*, CacheAndHttp, Result as SerenityResult};
+use serenity::{
+    all::ApplicationId, client::Cache, http::Http, model::channel::Message, prelude::*,
+    Result as SerenityResult,
+};
 use songbird::{driver::DecodeMode, Config, SerenityInit};
 use sqlx::postgres::PgPoolOptions;
 use tonic::transport::Server;
@@ -53,7 +56,8 @@ impl TypeMapKey for MpmcChannels {
 
 #[derive(Clone)]
 pub struct Custom {
-    cache_http: Arc<CacheAndHttp>,
+    cache: Arc<Cache>,
+    _http: Arc<Http>,
     data: Arc<RwLock<TypeMap>>,
 }
 
@@ -123,7 +127,7 @@ async fn main() {
         .event_handler(Handler { database: pool })
         .intents(intents)
         .register_songbird_from_config(songbird_config)
-        .application_id(application_id)
+        .application_id(ApplicationId::new(application_id))
         .await
         .expect("Err creating client");
     {
@@ -134,11 +138,13 @@ async fn main() {
         data.insert::<MpmcChannels>(Arc::new(RwLock::new(HashMap::new())));
     }
 
-    let http_cache = client.cache_and_http.clone();
+    let http = client.http.clone();
+    let cache = client.cache.clone();
     let data = client.data.clone();
 
     let custom = Custom {
-        cache_http: http_cache,
+        cache,
+        _http: http,
         data,
     };
 

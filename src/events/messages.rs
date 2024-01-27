@@ -4,6 +4,7 @@ use serenity::{
     client::Context,
     model::channel::{Message, MessageType},
 };
+use tracing::{error, info};
 
 use crate::event_handler::Handler;
 
@@ -39,10 +40,20 @@ pub async fn message(_self: &Handler, ctx: Context, msg: Message) {
         }
         MessageType::ThreadStarterMessage => todo!(),
         MessageType::ContextMenuCommand => todo!(),
-        MessageType::AutoModerationAction => todo!(),
-        MessageType::Unknown => {}
+
+        MessageType::AutoModAction => todo!(),
+        MessageType::RoleSubscriptionPurchase => todo!(),
+        MessageType::InteractionPremiumUpsell => todo!(),
+        MessageType::StageStart => todo!(),
+        MessageType::StageEnd => todo!(),
+        MessageType::StageSpeaker => todo!(),
+        MessageType::StageTopic => todo!(),
+        MessageType::GuildApplicationPremiumSubscription => todo!(),
+        MessageType::Unknown(_) => {
+            info!("unkown type");
+        }
         _ => {
-            println!("unkown type");
+            error!("unkown type");
         }
     }
 }

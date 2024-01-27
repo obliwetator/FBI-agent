@@ -2,7 +2,7 @@ pub mod channels;
 
 use crate::event_handler::Handler;
 use serenity::{
-    model::prelude::{Channel, Guild, GuildId},
+    model::prelude::{Guild, GuildId},
     prelude::Context,
 };
 use sqlx::Postgres;
@@ -13,7 +13,7 @@ pub(crate) async fn update_info(handler: &Handler, ctx: &Context, guilds: &Vec<G
     let guild_cached = &guilds
         .iter()
         .map(|guild| {
-            let x = guild.to_guild_cached(&ctx).unwrap();
+            let x = guild.to_guild_cached(&ctx).unwrap().to_owned();
             x
         })
         .collect();
@@ -36,8 +36,8 @@ async fn update_roles(guild_cached: &Vec<Guild>, handler: &Handler) {
             .push_values(
                 (&guild.roles).into_iter().take(BIND_LIMIT / 4),
                 |mut b, role| {
-                    b.push_bind(role.1.guild_id.0 as i64)
-                        .push_bind(role.0 .0 as i64)
+                    b.push_bind(role.1.guild_id.get() as i64)
+                        .push_bind(role.0.get() as i64)
                         .push_bind(role.1.permissions.bits() as i64)
                         .push_bind(&role.1.name);
                 },
@@ -60,7 +60,8 @@ async fn update_user_roles(guild_cached: &Vec<Guild>, handler: &Handler) {
 
                 query_builder
                     .push_values(perm.into_iter().take(BIND_LIMIT / 4), |mut b, role| {
-                        b.push_bind(user_id.0 as i64).push_bind(role.0 as i64);
+                        b.push_bind(user_id.get() as i64)
+                            .push_bind(role.get() as i64);
                     })
                     .push(" ON CONFLICT (user_id, role_id) DO UPDATE SET role_id=EXCLUDED.role_id");
 
@@ -80,19 +81,17 @@ async fn update_permissions(guild_cached: &Vec<Guild>, handler: &Handler) {
                 "INSERT INTO channel_permissions (channel_id, target_id, kind, allow, deny) ",
             );
 
-            match channel {
-                Channel::Guild(ok) => {
-                    let perm = &ok.permission_overwrites;
-                    if perm.len() > 0 {
-                        query_builder
+            let perm = &channel.permission_overwrites;
+            if perm.len() > 0 {
+                query_builder
                         .push_values(perm.into_iter().take(BIND_LIMIT / 5), |mut b, p| {
                             let kind = {
                                 match p.kind {
                                     serenity::model::prelude::PermissionOverwriteType::Member(
-                                        ok,
-                                    ) => ("user", ok.0 as i64),
-                                    serenity::model::prelude::PermissionOverwriteType::Role(ok) => {
-                                        ("role", ok.0 as i64)
+                                        channel,
+                                    ) => ("user", channel.get() as i64),
+                                    serenity::model::prelude::PermissionOverwriteType::Role(channel) => {
+                                        ("role", channel.get() as i64)
                                     }
                                     _ => {
                                         panic!("this should not happen")
@@ -101,7 +100,7 @@ async fn update_permissions(guild_cached: &Vec<Guild>, handler: &Handler) {
                             };
 
 
-                            b.push_bind(ok.id.0 as i64)
+                            b.push_bind(channel.id.get() as i64)
                                 .push_bind(kind.1)
                                 .push_bind(kind.0)
                                 .push_bind(p.allow.bits() as i64)
@@ -111,14 +110,9 @@ async fn update_permissions(guild_cached: &Vec<Guild>, handler: &Handler) {
                             " ON CONFLICT (channel_id, target_id) DO UPDATE SET allow = EXCLUDED.allow, deny = EXCLUDED.deny",
                         );
 
-                        let query = query_builder.build();
+                let query = query_builder.build();
 
-                        let res = query.execute(&handler.database).await.unwrap();
-                    }
-                }
-                Channel::Private(_) => {}
-                Channel::Category(_) => {}
-                _ => {}
+                let res = query.execute(&handler.database).await.unwrap();
             }
         }
 
@@ -134,8 +128,8 @@ async fn update_guilds(guild_cached: &Vec<Guild>, handler: &Handler) {
         .push_values(
             guild_cached.into_iter().take(BIND_LIMIT / 2),
             |mut b, guild| {
-                b.push_bind(guild.id.0 as i64)
-                    .push_bind(guild.owner_id.0 as i64);
+                b.push_bind(guild.id.get() as i64)
+                    .push_bind(guild.owner_id.get() as i64);
             },
         )
         .push(" ON CONFLICT DO NOTHING ");
@@ -154,28 +148,13 @@ async fn update_channels(guild_cached: &Vec<Guild>, handler: &Handler) {
         let ch = &guild.channels;
 
         query_builder
-            .push_values(
-                ch.into_iter().take(BIND_LIMIT / 4),
-                |mut b, channel| match channel.1 {
-                    Channel::Guild(ok) => {
-                        b.push_bind(ok.id.0 as i64)
-                            .push_bind(ok.guild_id.0 as i64)
-                            .push_bind(ok.kind as i32)
-                            .push_bind(ok.name());
-                    }
-                    Channel::Private(ok) => {
-                        // ignore private channels
-                        // b.push_bind(ok.id.0 as i64).push_bind(ok.guild_id.0 as i64);
-                    }
-                    Channel::Category(ok) => {
-                        b.push_bind(ok.id.0 as i64)
-                            .push_bind(ok.guild_id.0 as i64)
-                            .push_bind(ok.kind as i32)
-                            .push_bind(ok.name());
-                    }
-                    _ => {}
-                },
-            )
+            .push_values(ch.into_iter().take(BIND_LIMIT / 4), |mut b, channel| {
+                let value = channel.1.kind;
+                b.push_bind(channel.1.id.get() as i64)
+                    .push_bind(channel.1.guild_id.get() as i64)
+                    .push_bind(u8::from(channel.1.kind) as i32)
+                    .push_bind(channel.1.name());
+            })
             .push(" ON CONFLICT (channel_id) DO UPDATE SET name=EXCLUDED.name ");
 
         let query = query_builder.build();
