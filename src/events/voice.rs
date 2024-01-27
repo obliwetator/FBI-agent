@@ -1,4 +1,5 @@
 use crate::{event_handler::Handler, get_lock_read, MpmcChannels};
+use chrono::Datelike;
 use serenity::{
     async_trait,
     client::Context,
@@ -12,13 +13,14 @@ use songbird::{
     model::payload::{ClientDisconnect, Speaking},
     CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler,
 };
-use std::sync::Arc;
+use sqlx::{Pool, Postgres};
+use std::sync::{atomic::AtomicBool, Arc};
 use std::{collections::HashMap, time::Duration};
-use tokio::task::JoinHandle;
 use tokio::{
     io::AsyncWriteExt,
     process::{Child, Command},
 };
+use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{error, info};
 
 pub const RECORDING_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/voice_recordings";
@@ -42,87 +44,170 @@ enum CustomMsg {
 
 #[derive(Clone)]
 struct Receiver {
+    pool: Pool<Postgres>,
     buffer: Arc<Mutex<HashMap<u32, Vec<i16>>>>,
     channel_id: ChannelId,
     ctx_main: Arc<Context>,
-    // now: Arc<Mutex<HashMap<u32, std::time::Instant>>>,
+    now: Arc<RwLock<HashMap<u32, chrono::DateTime<chrono::Utc>>>>,
+    file_name: Arc<RwLock<HashMap<u32, String>>>,
+    was_only_user: Arc<AtomicBool>,
     guild_id: GuildId,
-    s_r: Arc<(
-        tokio::sync::broadcast::Sender<i32>,
-        tokio::sync::broadcast::Receiver<i32>,
-    )>,
-    ssrc_ffmpeg_hashmap: Arc<Mutex<HashMap<u32, Child>>>,
+    // s_r: Arc<(
+    //     tokio::sync::broadcast::Sender<i32>,
+    //     tokio::sync::broadcast::Receiver<i32>,
+    // )>,
+    ssrc_ffmpeg_hashmap: Arc<RwLock<HashMap<u32, Child>>>,
     /// the key is the ssrc, the value is the user id
     /// If the value is none that means we don't want to record that user (for now bots)
-    ssrc_hashmap: Arc<Mutex<HashMap<u32, SsrcStruct>>>,
-    user_id_hashmap: Arc<Mutex<HashMap<u64, u32>>>,
+    ssrc_hashmap: Arc<RwLock<HashMap<u32, SsrcStruct>>>,
+    user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
 }
 
 impl Receiver {
     pub async fn new(
+        pool: Pool<Postgres>,
         ctx: Arc<Context>,
         guild_id: GuildId,
         channel_id: ChannelId,
         s_r: Arc<(
+            // Handler
             tokio::sync::broadcast::Sender<i32>,
-            tokio::sync::broadcast::Receiver<i32>,
+            // Receiver
+            tokio::sync::broadcast::Sender<i32>,
         )>,
     ) -> Self {
         // You can manage state here, such as a buffer of audio packet bytes so
         // you can later store them in intervals.
 
-        let me = Self {
+        let me: Receiver = Self {
+            pool,
+            now: Arc::new(RwLock::new(HashMap::new())),
+            file_name: Arc::new(RwLock::new(HashMap::new())),
             ctx_main: ctx,
-            ssrc_hashmap: Arc::new(Mutex::new(HashMap::new())),
-            user_id_hashmap: Arc::new(Mutex::new(HashMap::new())),
-            ssrc_ffmpeg_hashmap: Arc::new(Mutex::new(HashMap::new())),
+            ssrc_hashmap: Arc::new(RwLock::new(HashMap::new())),
+            user_id_hashmap: Arc::new(RwLock::new(HashMap::new())),
+            ssrc_ffmpeg_hashmap: Arc::new(RwLock::new(HashMap::new())),
             // now: Arc::new(Mutex::new(HashMap::new())),
             guild_id,
             channel_id,
             buffer: Arc::new(Mutex::new(HashMap::new())),
-            s_r: s_r.clone(),
+            was_only_user: Arc::new(AtomicBool::new(true)), // s_r: s_r.clone(),
         };
 
-        me.spawn_task((s_r.0.clone(), s_r.0.subscribe())).await;
+        me.spawn_task((s_r.0.clone(), s_r.1.clone())).await;
 
         me
     }
 
-    pub async fn leave_voice_channel(&self) {
-        {
-            info!(
-                "Size of ssrc hashmap: {}",
-                self.ssrc_hashmap.lock().await.len()
-            );
-        }
+    // pub async fn leave_voice_channel(&self) {
+    //     {
+    //         info!(
+    //             "Size of ssrc hashmap: {}",
+    //             self.ssrc_hashmap.lock().await.len()
+    //         );
+    //     }
 
-        if self.ssrc_hashmap.lock().await.is_empty() {
-            info!("Disconnect self");
-            // dissconect self.
-            // might be optional
-            let manager = songbird::get(&self.ctx_main).await.unwrap();
-            // let _ = manager.remove(self.guild_id).await;
-        }
-    }
+    //     if self.ssrc_hashmap.lock().await.is_empty() {
+    //         info!("Disconnect self");
+    //         // dissconect self.
+    //         // might be optional
+    //         let manager = songbird::get(&self.ctx_main).await.unwrap();
+    //         // let _ = manager.remove(self.guild_id).await;
+    //     }
+    // }
 
     pub async fn spawn_task(
         &self,
-        mut s_r: (
+        s_r: (
+            // Handler
             tokio::sync::broadcast::Sender<i32>,
-            tokio::sync::broadcast::Receiver<i32>,
+            // Receiver
+            tokio::sync::broadcast::Sender<i32>,
         ),
     ) -> JoinHandle<()> {
-        tokio::task::spawn(async move {
-            loop {
-                let res = s_r.1.recv().await.unwrap();
-                if res == 2 {
-                    let res = s_r.1.recv().await.unwrap();
+        info!("Spawn task");
 
+        let clone_ffmpeg = self.ssrc_ffmpeg_hashmap.clone();
+        let clone_now = self.now.clone();
+        let clone_file = self.file_name.clone();
+        let clone_user_id = self.ssrc_ffmpeg_hashmap.clone();
+        let clone_only_user = self.was_only_user.clone();
+        let clone_pool = self.pool.clone();
+
+        tokio::task::spawn(async move {
+            let clo_ffmpeg = clone_ffmpeg;
+            let clo_now = clone_now;
+            let clo_file = clone_file;
+            let clo_user_id = clone_user_id;
+            let clo_only_user = clone_only_user;
+            let clo_pool = clone_pool;
+            let mut receiver_receiver = s_r.1.subscribe();
+            loop {
+                let res = receiver_receiver.recv().await.unwrap();
+                if res == 1 {
+                    info!("RES == 1");
                     tokio::time::sleep(Duration::from_secs(1)).await;
 
                     s_r.0.send(2).unwrap();
+                } else if res == 2 {
+                    info!("RES == 2");
+                    // HERE
+                    // let child = clo.lock().await.remove(&0).unwrap();
+                    // let mut lock = clo_ffmpeg.write().await;
+                    // let iter = lock.drain();
+
+                    // for (key, child) in iter {
+                    //     let output = child.wait_with_output().await.unwrap();
+
+                    //     let lock_now = clo_now.read().await;
+                    //     let now = lock_now.get(&key).unwrap();
+
+                    //     let time_elapsed = chrono::Utc::now()
+                    //         .signed_duration_since(*now)
+                    //         .num_milliseconds();
+
+                    //     let lock_file: tokio::sync::RwLockReadGuard<'_, HashMap<u32, String>> =
+                    //         clo_file.read().await;
+                    //     let file_name = lock_file.get(&key).unwrap();
+
+                    //     let last_person_in_channel = { clo_user_id.read().await.len() == 0 };
+
+                    //     let state = {
+                    //         let was_only_user =
+                    //             clo_only_user.load(std::sync::atomic::Ordering::SeqCst);
+
+                    //         if last_person_in_channel && was_only_user {
+                    //             // IF user was last in the channel AND he ws the only user in the channel
+                    //             4
+                    //         } else if last_person_in_channel {
+                    //             3
+                    //         } else {
+                    //             2
+                    //         }
+                    //     };
+
+                    //     match sqlx::query!(
+                    //         "UPDATE audio_files
+                    // 		SET end_ts = audio_files.start_ts + $1, state = $2
+                    // 		WHERE file_name = $3",
+                    //         time_elapsed,
+                    //         state,
+                    //         file_name
+                    //     )
+                    //     .execute(&clo_pool)
+                    //     .await
+                    //     {
+                    //         Ok(ok) => ok,
+                    //         Err(err) => {
+                    //             error!("{}", err);
+                    //             panic!()
+                    //         }
+                    //     };
+                    // }
+
+                    s_r.0.send(1).unwrap();
                 } else {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    info!("Unkown code");
 
                     s_r.0.send(2).unwrap();
                 }
@@ -191,31 +276,50 @@ impl VoiceEventHandler for Receiver {
                         // self.ssrc_hashmap.lock().await.insert(*ssrc, data);
                     }
 
+                    let is_channel_empty = {
+                        let len = self.user_id_hashmap.read().await.len();
+                        self.was_only_user
+                            .store(!(len > 0), std::sync::atomic::Ordering::SeqCst);
+
+                        len == 0
+                    };
+
                     {
                         self.user_id_hashmap
-                            .lock()
+                            .write()
                             .await
                             .insert(user_id.unwrap().0, *ssrc);
                     }
 
+                    // self.was_only_user = { self.user_id_hashmap };
+
                     {
-                        if self.ssrc_ffmpeg_hashmap.lock().await.get(ssrc).is_some() {
+                        if self.ssrc_ffmpeg_hashmap.read().await.get(ssrc).is_some() {
                             // we have already spawned an ffmpeg process
                             error!("already got ffmpegf process");
                         } else {
                             info!("New ffmpegf process");
                             // Create a process
+                            let now = chrono::Utc::now();
+                            {
+                                self.now.write().await.insert(*ssrc, now);
+                            }
                             let path = create_path(
+                                self,
+                                now,
+                                &self.pool,
                                 *ssrc,
                                 self.guild_id,
                                 self.channel_id,
                                 user_id.unwrap().0,
                                 &member,
+                                is_channel_empty,
                             )
                             .await;
 
                             let child = spawn_ffmpeg(&path);
-                            self.ssrc_ffmpeg_hashmap.lock().await.insert(*ssrc, child);
+
+                            self.ssrc_ffmpeg_hashmap.write().await.insert(*ssrc, child);
 
                             info!("1 file created for ssrc: {}", *ssrc);
                         }
@@ -229,7 +333,7 @@ impl VoiceEventHandler for Receiver {
             Ctx::VoicePacket(data) => {
                 if let Some(child) = self
                     .ssrc_ffmpeg_hashmap
-                    .lock()
+                    .write()
                     .await
                     .get_mut(&data.packet.ssrc)
                 {
@@ -295,9 +399,9 @@ impl VoiceEventHandler for Receiver {
 
                 {
                     // Bots
-                    let get_user_hashmap = self.user_id_hashmap.lock().await;
+                    let get_user_hashmap = self.user_id_hashmap.read().await;
                     if let Some(get_user_ssrc) = get_user_hashmap.get(&user_id.0) {
-                        let mut get_user_ssrc_hashmap = self.ssrc_hashmap.lock().await;
+                        let mut get_user_ssrc_hashmap = self.ssrc_hashmap.write().await;
                         if let Some(data) = get_user_ssrc_hashmap.remove(get_user_ssrc) {
                             if data.user_id.is_none() {
                                 // bot ignore
@@ -312,7 +416,7 @@ impl VoiceEventHandler for Receiver {
                 }
 
                 {
-                    let ssrc = match self.user_id_hashmap.lock().await.remove(&user_id.0) {
+                    let ssrc = match self.user_id_hashmap.write().await.remove(&user_id.0) {
                         Some(ok) => ok,
                         None => {
                             info!("tried to remove bot");
@@ -321,9 +425,60 @@ impl VoiceEventHandler for Receiver {
                         }
                     };
 
-                    let child = self.ssrc_ffmpeg_hashmap.lock().await.remove(&ssrc).unwrap();
+                    let child = self
+                        .ssrc_ffmpeg_hashmap
+                        .write()
+                        .await
+                        .remove(&ssrc)
+                        .unwrap();
 
                     let output = child.wait_with_output().await.unwrap();
+
+                    let lock_now = self.now.read().await;
+                    let now = lock_now.get(&ssrc).unwrap();
+
+                    let time_elapsed = chrono::Utc::now()
+                        .signed_duration_since(*now)
+                        .num_milliseconds();
+
+                    let lock_file: tokio::sync::RwLockReadGuard<'_, HashMap<u32, String>> =
+                        self.file_name.read().await;
+                    let file_name = lock_file.get(&ssrc).unwrap();
+
+                    let last_person_in_channel = { self.user_id_hashmap.read().await.len() == 0 };
+                    // 2 = JOINED 3 = LAST 4 = FIRST_LAST
+                    let state = {
+                        let was_only_user =
+                            self.was_only_user.load(std::sync::atomic::Ordering::SeqCst);
+
+                        if last_person_in_channel && was_only_user {
+                            // IF user was last in the channel AND he ws the only user in the channel
+                            4
+                        } else if last_person_in_channel {
+                            3
+                        } else {
+                            2
+                        }
+                    };
+
+                    match sqlx::query!(
+                        "UPDATE audio_files
+						SET end_ts = audio_files.start_ts + $1, state = $2
+						WHERE file_name = $3",
+                        time_elapsed,
+                        state,
+                        file_name
+                    )
+                    .execute(&__self.pool)
+                    .await
+                    {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            error!("{}", err);
+                            panic!()
+                        }
+                    };
+
                     // TODO: Remove
                     info!(
                         "stdout from wait_with_output {}",
@@ -374,18 +529,16 @@ fn spawn_ffmpeg(path: &str) -> Child {
 
 // TODO: username instead of id
 async fn create_path(
+    _self: &Receiver,
+    now: chrono::DateTime<chrono::Utc>,
+    pool: &Pool<Postgres>,
     ssrc: u32,
     guild_id: GuildId,
     channel_id: ChannelId,
     user_id: u64,
     member: &serenity::model::guild::Member,
+    is_channel_empty: bool,
 ) -> String {
-    let start = std::time::SystemTime::now();
-    let since_the_epoch = start
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards");
-
-    let now = chrono::Utc::now();
     let year = format!("{}", now.format("%Y"));
     let month = format!("{}", now.format("%B"));
     let day_number = format!("{}", now.format("%d"));
@@ -398,16 +551,24 @@ async fn create_path(
         "{}/{}/{}/{}/{}/",
         &RECORDING_FILE_PATH, guild_id.0, channel_id.0, year, month
     );
-    let combined_path = format!(
-        "{}/{}/{}/{}/{}/{}-{}-{}",
-        &RECORDING_FILE_PATH,
-        guild_id.0,
-        channel_id.0,
-        year,
-        month,
-        since_the_epoch.as_millis(),
+
+    let file_name = format!(
+        "{}-{}-{}",
+        now.timestamp_millis(),
         user_id,
         member.user.name
+    );
+
+    {
+        _self
+            .file_name
+            .write()
+            .await
+            .insert(ssrc, file_name.to_owned());
+    }
+    let combined_path = format!(
+        "{}/{}/{}/{}/{}/{}",
+        &RECORDING_FILE_PATH, guild_id.0, channel_id.0, year, month, file_name
     );
 
     // Try to create the dir in case it does not exist
@@ -416,6 +577,32 @@ async fn create_path(
         Ok(_) => {}
         Err(err) => {
             panic!("cannot create path: {}", err);
+        }
+    };
+
+    let null: Option<i64> = None;
+
+    match sqlx::query!(
+        "INSERT INTO audio_files 
+	(file_name, guild_id, channel_id, user_id, year, month, start_ts, end_ts, state) VALUES 
+	($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        file_name,
+        guild_id.0 as i64,
+        channel_id.0 as i64,
+        user_id as i64,
+        now.year(),
+        now.month() as i32,
+        now.timestamp_millis(),
+        null,
+        if is_channel_empty { 1 } else { 2 }
+    )
+    .execute(pool)
+    .await
+    {
+        Ok(ok) => ok,
+        Err(err) => {
+            error!("{}", err);
+            panic!()
         }
     };
 
@@ -458,11 +645,6 @@ pub async fn voice_state_update(
             }
         }
 
-        // The bot will join a voice channel with the following priorities
-        // 1) There must be at least 3 people in a channel
-        // 2) If 2 or more channels have the same count, will join the channel that has the highest average role (TODO)
-        // 3) If above is equal will join a channel with the oldest member
-
         let (highest_channel_id, highest_channel_len) =
             match get_channel_with_most_members(&ctx, &new_state).await {
                 Some(value) => value,
@@ -475,6 +657,7 @@ pub async fn voice_state_update(
         if highest_channel_len > 0 {
             let user_id = new_state.user_id;
             connect_to_voice_channel(
+                _self.database.clone(),
                 &ctx,
                 new_state.guild_id.unwrap(),
                 highest_channel_id,
@@ -523,7 +706,7 @@ async fn handle_no_people_in_channel(
             // TODO: fix that atrocity ^
             {
                 info!("No more human users left. Leaving channel");
-                leave = true;
+                // leave = true;
                 // leave_voice_channel(&ctx, new_state.guild_id.unwrap()).await;
                 return None;
             }
@@ -559,7 +742,7 @@ async fn get_channel_with_most_members(
         if let Some(afk_channel_id) = afk_channel_id_option {
             // Ignore channels that are meant for afk
             if *afk_channel_id == channel_id.0 {
-                info!("Guild has an afk channel with most members. Dont enter");
+                info!("Ignore AFK channel");
                 continue;
             }
         }
@@ -595,18 +778,37 @@ async fn get_channel_with_most_members(
 }
 
 async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
-    let lock = {
-        let data_read = ctx.data.read().await;
-        data_read
-            .get::<MpmcChannels>()
-            .expect("Expected struct")
-            .clone()
-    };
+    {
+        let lock = {
+            let data_read = ctx.data.read().await;
+            data_read
+                .get::<MpmcChannels>()
+                .expect("Expected struct")
+                .clone()
+        };
 
-    let hash_map = lock.write().await;
-    let (s, r) = hash_map.get(&guild_id.0).expect("channel not innitialized");
+        let hash_map = lock.write().await;
+        let (handler, receiver) = hash_map.get(&guild_id.0).expect("channel not innitialized");
 
-    handle_graceful_shutdown(s.clone()).await;
+        handle_graceful_shutdown(handler.clone(), receiver.clone(), 1).await;
+    }
+
+    {
+        // Cleanup channel
+        let lock = {
+            let data_read = ctx.data.read().await;
+            data_read
+                .get::<MpmcChannels>()
+                .expect("Expected struct")
+                .clone()
+        };
+        let mut hash_map = lock.write().await;
+
+        if hash_map.contains_key(&guild_id.0) {
+            // Clean the channels
+            let _ = hash_map.remove(&guild_id.0);
+        };
+    }
 
     let manager = songbird::get(ctx)
         .await
@@ -619,6 +821,7 @@ async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
 }
 
 pub async fn connect_to_voice_channel(
+    pool: Pool<Postgres>,
     ctx: &Context,
     guild_id: GuildId,
     channel_id: ChannelId,
@@ -634,18 +837,28 @@ pub async fn connect_to_voice_channel(
         let ch = arc_call.lock().await.current_channel().unwrap();
         if ch.0 != channel_id.0 {
             info!("Switching channels");
-            join_ch(manager, guild_id, channel_id, ctx, user_id, Some(ch.0)).await;
+            join_ch(
+                pool,
+                manager,
+                guild_id,
+                channel_id,
+                ctx,
+                user_id,
+                Some(ch.0),
+            )
+            .await;
         } else {
             info!("already in channel");
         }
     } else {
         // join channel
 
-        join_ch(manager, guild_id, channel_id, ctx, user_id, None).await;
+        join_ch(pool, manager, guild_id, channel_id, ctx, user_id, None).await;
     }
 }
 
 async fn join_ch(
+    pool: Pool<Postgres>,
     manager: Arc<songbird::Songbird>,
     guild_id: GuildId,
     channel_id: ChannelId,
@@ -667,21 +880,22 @@ async fn join_ch(
             Some(ok) => {
                 info!("channels already exists");
 
-                let s = ok.0.clone();
-                handle_graceful_shutdown(s).await;
+                let handler = ok.0.clone();
+                let receiver = ok.1.clone();
+                handle_graceful_shutdown(handler, receiver, 2).await;
 
                 ok
             }
             None => {
                 info!("new channels");
-                let (s, r) = tokio::sync::broadcast::channel::<i32>(10);
-                hash_map.insert(guild_id.0, (s, r));
+                let (sender_for_handler, _) = tokio::sync::broadcast::channel::<i32>(10);
+                let (sender_for_receiver, _) = tokio::sync::broadcast::channel::<i32>(10);
+                hash_map.insert(guild_id.0, (sender_for_handler, sender_for_receiver));
 
                 hash_map.get(&guild_id.0).unwrap()
             }
         };
-
-        (result.0.clone(), result.0.subscribe())
+        (result.0.clone(), result.1.clone())
     };
 
     let (handler_lock, res) = manager.join(guild_id, channel_id).await;
@@ -709,7 +923,8 @@ async fn join_ch(
                 // handler.remove_all_global_events();
 
                 let ctx1 = Arc::new(ctx.clone());
-                let receiver = Receiver::new(ctx1, guild_id, channel_id, Arc::new(channel)).await;
+                let receiver =
+                    Receiver::new(pool, ctx1, guild_id, channel_id, Arc::new(channel)).await;
 
                 handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
 
@@ -732,18 +947,25 @@ async fn join_ch(
     }
 }
 
-async fn handle_graceful_shutdown(s: tokio::sync::broadcast::Sender<i32>) {
-    // Termination signal
-    s.send(1).unwrap();
-
+async fn handle_graceful_shutdown(
+    handler: tokio::sync::broadcast::Sender<i32>,
+    receiver: tokio::sync::broadcast::Sender<i32>,
+    code: i32,
+) {
+    info!("handle graceful shutdown");
     // Subscribe for a response
-    let mut r1 = s.subscribe();
+    let mut r1 = handler.subscribe();
+
+    // Termination signal
+    receiver.send(code).unwrap();
 
     // Get response
     let res = r1.recv().await.unwrap();
 
     if res == 2 {
         info!("Response received, shutting down")
+    } else if res == 1 {
+        info!("Response received, cleanup complete")
     } else {
         error!("RES IS :{}", res);
         panic!();
