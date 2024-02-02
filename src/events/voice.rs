@@ -3,7 +3,6 @@ use chrono::Datelike;
 use serenity::{
     async_trait,
     client::Context,
-    http::CacheHttp,
     model::{
         id::{ChannelId, GuildId},
         prelude::Member,
@@ -12,7 +11,6 @@ use serenity::{
 };
 use songbird::{
     model::payload::{ClientDisconnect, Speaking},
-    packet::Packet,
     CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler,
 };
 use sqlx::{Pool, Postgres};
@@ -23,7 +21,7 @@ use tokio::{
     process::{Child, Command},
 };
 use tokio::{sync::RwLock, task::JoinHandle};
-use tracing::{error, info};
+use tracing::{error, info, trace};
 
 pub const RECORDING_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/voice_recordings";
 pub const CLIPS_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/clips";
@@ -331,90 +329,46 @@ impl VoiceEventHandler for Receiver {
             }
 
             Ctx::RtpPacket(packet) => {
-                let rtp = packet.rtp();
-                if let Some(child) = self
-                    .ssrc_ffmpeg_hashmap
-                    .write()
-                    .await
-                    .get_mut(&rtp.get_ssrc())
-                {
-                    let mut buffer = self.buffer.lock().await;
-                    let res = buffer.get_mut(&rtp.get_ssrc()).unwrap();
-                    if let Some(stdin) = child.stdin.as_mut() {
-                        let mut result: Vec<u8> = Vec::new();
-                        let _ = result.write_all(rtp.payload()).await;
-
-                        // for &n in audio_i16 {
-                        //     // TODO: Use buffer
-                        //     let _ = result.write_i16_le(n).await;
-                        // }
-
-                        match stdin.write_all(&result).await {
-                            Ok(_) => {}
-                            Err(err) => {
-                                error!("Could not write to stdin: {}", err)
-                            }
-                        };
-                    } else {
-                        info!("no stdin");
-                    }
-                } else {
-                    error!("No child");
-                }
+                // Those are the undecoded opus packets
             }
-            Ctx::VoiceTick(data) => {
-                // if let Some(child) = self
-                //     .ssrc_ffmpeg_hashmap
-                //     .write()
-                //     .await
-                //     .get_mut(&data.packet.ssrc)
-                // {
-                //     if let Some(audio_i16) = data.audio {
-                //         //     info!(
-                //         // 	"Audio packet sequence {:05} has {:04} bytes (decompressed from {}), SSRC {}",
-                //         // 	data.packet.sequence.0,
-                //         // 	audio_i16.len() * std::mem::size_of::<i16>(),
-                //         // 	data.packet.payload.len(),
-                //         // 	data.packet.ssrc,
-                //         // );
+            Ctx::VoiceTick(tick) => {
+                for (ssrc, data) in &tick.speaking {
+                    if let Some(child) = self.ssrc_ffmpeg_hashmap.write().await.get_mut(ssrc) {
+                        // let mut buffer = self.buffer.lock().await;
+                        // let res = buffer.get_mut(ssrc).unwrap();
+                        if let Some(stdin) = child.stdin.as_mut() {
+                            // let mut result: Vec<u8> = Vec::new();
 
-                //         // {
-                //         //     let mut lock = self.size.lock().await;
-                //         //     let value = *lock.get(&data.packet.ssrc).unwrap();
-                //         //     // drop(lock);
-                //         //     *lock.get_mut(&data.packet.ssrc).unwrap() = audio_i16.len() + value;
-                //         // }
+                            // let _ = result.write_all(rtp.payload()).await;
 
-                //         let mut buffer = self.buffer.lock().await;
-                //         let res = buffer.get_mut(&data.packet.ssrc).unwrap();
-                //         if let Some(stdin) = child.stdin.as_mut() {
-                //             let mut result: Vec<u8> = Vec::new();
+                            // for &n in audio_i16 {
+                            //     // TODO: Use buffer
+                            //     let _ = result.write_i16_le(n).await;
+                            // }
+                            if let Some(decoded_voice) = data.decoded_voice.as_ref() {
+                                let mut result: Vec<u8> = Vec::new();
 
-                //             for &n in audio_i16 {
-                //                 // TODO: Use buffer
-                //                 let _ = result.write_i16_le(n).await;
-                //             }
+                                for &n in decoded_voice {
+                                    // TODO: Use buffer
+                                    let _ = result.write_i16_le(n).await;
+                                }
 
-                //             match stdin.write_all(&result).await {
-                //                 Ok(_) => {}
-                //                 Err(err) => {
-                //                     error!("Could not write to stdin: {}", err)
-                //                 }
-                //             };
-                //         } else {
-                //             info!("no stdin");
-                //         }
-                //     } else {
-                //         info!("No audio");
-                //     }
-                // } else {
-                //     error!("No child");
-                // }
-                //     } else {
-                //     }
-                // }
-
-                // info!("Messsage time elapsed micro:{}", now.elapsed().as_micros());
+                                match stdin.write_all(&result).await {
+                                    Ok(_) => {}
+                                    Err(err) => {
+                                        error!("Could not write to stdin: {}", err)
+                                    }
+                                };
+                            } else {
+                                info!(" Decode disabled.");
+                            }
+                        } else {
+                            info!("no stdin");
+                        }
+                    } else {
+                        error!("No child");
+                    }
+                }
             }
             Ctx::RtcpPacket(data) => {
                 // An event which fires for every received rtcp packet,
@@ -512,14 +466,14 @@ impl VoiceEventHandler for Receiver {
                     };
 
                     // TODO: Remove
-                    info!(
-                        "stdout from wait_with_output {}",
-                        String::from_utf8(output.stdout).unwrap()
-                    );
-                    info!(
-                        "stderr from wait_with_output {}",
-                        String::from_utf8(output.stderr).unwrap()
-                    );
+                    // info!(
+                    //     "stdout from wait_with_output {}",
+                    //     String::from_utf8(output.stdout).unwrap()
+                    // );
+                    // info!(
+                    //     "stderr from wait_with_output {}",
+                    //     String::from_utf8(output.stderr).unwrap()
+                    // );
                 }
 
                 // self.leave_voice_channel().await;
@@ -551,8 +505,8 @@ fn spawn_ffmpeg(path: &str) -> Child {
         .arg(format!("{}.ogg", path)) // output
         .stdin(std::process::Stdio::piped())
         // The command will hangup if the pipe is not consumed. So set it to null if we are not doing anything with it.
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
         .spawn();
 
     command.unwrap()
@@ -662,6 +616,7 @@ pub async fn voice_state_update(
     old_state: Option<serenity::model::prelude::VoiceState>,
     new_state: serenity::model::prelude::VoiceState,
 ) {
+    info!("Voice state update");
     if let Some(member) = &new_state.member {
         if member.user.bot {
             // Ignore bots
@@ -728,14 +683,18 @@ async fn handle_no_people_in_channel(
         // NOTE: There can be other people in different channels. Check for this
 
         if let Some(channel) = old_state.as_ref().unwrap().channel_id {
-            let guild = channel
-                .to_channel_cached(&ctx.cache().unwrap())
-                .unwrap()
-                .guild(&ctx.cache().unwrap())
-                .unwrap()
-                .to_owned();
-            let vec = guild.members(&ctx.http, None, None).await;
-            let members: Vec<Member> = vec.unwrap().into_iter().filter(|f| !f.user.bot).collect();
+            let current_channel = channel.to_channel(&ctx).await.unwrap();
+
+            let guild_channel = current_channel.guild().unwrap();
+
+            let vec = guild_channel.members(&ctx).unwrap();
+            let members: Vec<Member> = vec
+                .into_iter()
+                // Don't include bots
+                .filter(|f| !f.user.bot)
+                .collect();
+
+            info!("MEMBERS: {:#?}", members);
 
             // No Human users left
             if members.len() == 0
@@ -746,6 +705,8 @@ async fn handle_no_people_in_channel(
                 // leave = true;
                 // leave_voice_channel(&ctx, new_state.guild_id.unwrap()).await;
                 return None;
+            } else {
+                trace!("Human users still in channel.");
             }
         }
     }
@@ -773,7 +734,7 @@ async fn get_channel_with_most_members(
         .guild(new_state.guild_id.unwrap())
         .expect("cannot clone guild from cache")
         .channels;
-    let mut highest_channel_id: ChannelId = ChannelId::new(0);
+    let mut highest_channel_id: ChannelId = ChannelId::new(1);
     let mut highest_channel_len: usize = 0;
     for (channel_id, guild_channel) in all_channels {
         if let Some(afk_channel_id) = afk_channel_id_option {
@@ -960,7 +921,7 @@ async fn join_ch(
 
                 handler.add_global_event(CoreEvent::VoiceTick.into(), receiver.clone());
 
-                handler.add_global_event(CoreEvent::RtpPacket.into(), receiver.clone());
+                // handler.add_global_event(CoreEvent::RtpPacket.into(), receiver.clone());
 
                 handler.add_global_event(CoreEvent::RtcpPacket.into(), receiver.clone());
 
