@@ -26,7 +26,7 @@ pub async fn guild_create(
     guild: serenity::model::guild::Guild,
     is_new: Option<bool>,
 ) {
-    // println!("guild data : {:?}", is_new);
+    // info!("guild data : {:?}", is_new);
     // database::guilds::sync_guilds(guild, is_new).await;
 }
 

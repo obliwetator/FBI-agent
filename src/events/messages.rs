@@ -13,7 +13,7 @@ pub async fn message(_self: &Handler, ctx: Context, msg: Message) {
     // db_helper::get_channels(&pool).await;
 
     let now = Instant::now();
-    // println!("message is {}", msg.content);
+    // info!("message is {}", msg.content);
     match msg.kind {
         MessageType::Regular => {}
         MessageType::ChannelFollowAdd => {}

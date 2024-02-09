@@ -387,7 +387,9 @@ impl EventHandler for Handler {
     }
 
     // TODO
-    async fn resume(&self, _ctx: Context, _: serenity::model::event::ResumedEvent) {}
+    async fn resume(&self, _ctx: Context, _: serenity::model::event::ResumedEvent) {
+        info!("Resumed");
+    }
 
     // TODO
     async fn shard_stage_update(&self, _ctx: Context, _: serenity::gateway::ShardStageUpdateEvent) {
@@ -403,7 +405,7 @@ impl EventHandler for Handler {
         _old_data: Option<serenity::model::prelude::CurrentUser>,
         _new: serenity::model::prelude::CurrentUser,
     ) {
-        println!("bot Updated. Old: {:#?}, New: {:#?}", _old_data, _new);
+        info!("bot Updated. Old: {:#?}, New: {:#?}", _old_data, _new);
     }
 
     async fn voice_server_update(

@@ -189,12 +189,12 @@ async fn main() {
     // // Shards will automatically attempt to reconnect, and will perform
     // // exponential backoff until it reconnects.
     // if let Err(why) = client.start().await {
-    //     println!("Client error: {:?}", why);
+    //     info!("Client error: {:?}", why);
     // }
 }
 
 pub fn check_msg(result: SerenityResult<Message>) {
     if let Err(why) = result {
-        println!("Error sending message: {:?}", why);
+        info!("Error sending message: {:?}", why);
     }
 }

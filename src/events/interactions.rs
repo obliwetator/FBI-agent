@@ -30,7 +30,7 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                 )
                 .await
             {
-                println!("Cannot respond to slash command: {}", why);
+                info!("Cannot respond to slash command: {}", why);
             }
         }
         Interaction::Component(_) => todo!(),
