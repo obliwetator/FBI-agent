@@ -678,12 +678,20 @@ async fn handle_no_people_in_channel(
 ) -> Option<bool> {
     let mut leave = false;
     if new_state.channel_id.is_none() {
+        if member.user.id == ctx.cache.current_user().id {
+            // From testing this will never trigger because the bot is disconnected before an event is received
+            // Check if the our application was kicked
+            info!("bot was kicked/left");
+            let guild_id = new_state.guild_id.unwrap();
+            leave = true;
+            leave_voice_channel(ctx, guild_id).await;
+        }
         // Someone left the channel
         // Check if that person was the last HUMAN user to leave the channel
         // NOTE: There can be other people in different channels. Check for this
 
-        if let Some(channel) = old_state.as_ref().unwrap().channel_id {
-            let current_channel = channel.to_channel(&ctx).await.unwrap();
+        if let Some(channel_id) = old_state.as_ref().unwrap().channel_id {
+            let current_channel = channel_id.to_channel(&ctx).await.unwrap();
 
             let guild_channel = current_channel.guild().unwrap();
 
@@ -694,12 +702,9 @@ async fn handle_no_people_in_channel(
                 .filter(|f| !f.user.bot)
                 .collect();
 
-            info!("MEMBERS: {:#?}", members);
-
             // No Human users left
             if members.len() == 0
             // just the bot is left
-            // TODO: fix that atrocity ^
             {
                 info!("No more human users left. Leaving channel");
                 // leave = true;
@@ -709,14 +714,6 @@ async fn handle_no_people_in_channel(
                 trace!("Human users still in channel.");
             }
         }
-    }
-    // Check if the our application was kicked
-    else if member.user.id == ctx.cache.current_user().id && new_state.channel_id.is_none() {
-        info!("bot was kicked/left");
-        // Bot Left/Disconnected from the channel
-        let guild_id = new_state.guild_id.unwrap();
-        leave = true;
-        leave_voice_channel(ctx, guild_id).await;
     }
     Some(leave)
 }
