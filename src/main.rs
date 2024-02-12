@@ -1,6 +1,6 @@
 // use std::env;
 #![allow(unused_variables)]
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use serenity::{
     all::ApplicationId, client::Cache, http::Http, model::channel::Message, prelude::*,
@@ -9,8 +9,8 @@ use serenity::{
 use songbird::{driver::DecodeMode, Config, SerenityInit};
 use sqlx::postgres::PgPoolOptions;
 use tonic::transport::Server;
-use tracing::info;
-use tracing_subscriber::prelude::*;
+use tracing::{info, Level};
+use tracing_subscriber::{prelude::*, FmtSubscriber};
 
 use crate::{
     event_handler::Handler,
@@ -75,22 +75,37 @@ pub async fn get_lock_read(ctx: &Context) -> Arc<RwLock<HashMap<u64, Option<u64>
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::registry()
-        // add the console layer to the subscriber
-        .with(
-            console_subscriber::ConsoleLayer::builder()
-                .server_addr(([127, 0, 0, 1], 5555))
-                .retention(Duration::from_secs(180))
-                .spawn(),
-        )
-        // add other layers...
-        .with(
-            tracing_subscriber::fmt::layer()
-                .pretty()
-                .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
-        )
-        // .with(...)
-        .init();
+    // install global collector configured based on RUST_LOG env var.
+    let subscriber = FmtSubscriber::builder()
+        // .with_thread_names(true)
+        // .with_file(true)
+        // .with_target(true)
+        // .with_line_number(true)
+        // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
+        // will be written to stdout.
+        .with_max_level(Level::INFO)
+        .pretty()
+        // completes the builder.
+        .finish();
+
+    // tracing_subscriber::registry()
+    //     // add the console layer to the subscriber
+    //     .with(
+    //         console_subscriber::ConsoleLayer::builder()
+    //             .server_addr(([127, 0, 0, 1], 5555))
+    //             .retention(Duration::from_secs(180))
+    //             .spawn(),
+    //     )
+    //     // add other layers...
+    //     .with(
+    //         tracing_subscriber::fmt::layer()
+    //             .pretty()
+    //             .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
+    //     )
+    //     // .with(...)
+    //     .init();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     tracing::log::info!("yak shaving completed.");
     // create relevant folders
