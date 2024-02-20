@@ -14,7 +14,7 @@ use songbird::{
     CoreEvent, Event, EventContext, EventHandler as VoiceEventHandler,
 };
 use sqlx::{Pool, Postgres};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 use tokio::{
     io::AsyncWriteExt,
@@ -29,19 +29,6 @@ pub const CLIPS_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/clips";
 // const BUFFER_SIZE: usize = 6 * 1024 * 1024;
 // const DISCORD_SAMPLE_RATE: u16 = 48000;
 
-struct SsrcStruct {
-    // handle: JoinHandle<()>,
-    // tx: tokio::sync::mpsc::Sender<CustomMsg>,
-    user_id: Option<u64>,
-    // rx: tokio::sync::mpsc::Receiver<CustomMsg>,
-}
-
-#[derive(Debug)]
-enum CustomMsg {
-    // Get { speaking: bool },
-    // Set { speaking: bool },
-}
-
 #[derive(Clone)]
 struct Receiver {
     pool: Pool<Postgres>,
@@ -50,17 +37,21 @@ struct Receiver {
     ctx_main: Arc<Context>,
     now: Arc<RwLock<HashMap<u32, chrono::DateTime<chrono::Utc>>>>,
     file_name: Arc<RwLock<HashMap<u32, String>>>,
-    was_only_user: Arc<AtomicBool>,
     guild_id: GuildId,
-    // s_r: Arc<(
-    //     tokio::sync::broadcast::Sender<i32>,
-    //     tokio::sync::broadcast::Receiver<i32>,
-    // )>,
+    // ssrc
     ssrc_ffmpeg_hashmap: Arc<RwLock<HashMap<u32, Child>>>,
-    /// the key is the ssrc, the value is the user id
-    /// If the value is none that means we don't want to record that user (for now bots)
-    ssrc_hashmap: Arc<RwLock<HashMap<u32, SsrcStruct>>>,
+    // user_id
     user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
+    member_struct_ssrc: Arc<RwLock<HashMap<u32, Arc<VoiceChannelMembersData>>>>,
+    member_struct_id: Arc<RwLock<HashMap<u64, Arc<VoiceChannelMembersData>>>>,
+}
+
+struct VoiceChannelMembersData {
+    now: chrono::DateTime<chrono::Utc>,
+    file_name: String,
+    ssrc: u32,
+    ffmpeg_handle: Child,
+    buffer: Vec<i16>,
 }
 
 impl Receiver {
@@ -84,14 +75,14 @@ impl Receiver {
             now: Arc::new(RwLock::new(HashMap::new())),
             file_name: Arc::new(RwLock::new(HashMap::new())),
             ctx_main: ctx,
-            ssrc_hashmap: Arc::new(RwLock::new(HashMap::new())),
             user_id_hashmap: Arc::new(RwLock::new(HashMap::new())),
             ssrc_ffmpeg_hashmap: Arc::new(RwLock::new(HashMap::new())),
             // now: Arc::new(Mutex::new(HashMap::new())),
             guild_id,
             channel_id,
             buffer: Arc::new(Mutex::new(HashMap::new())),
-            was_only_user: Arc::new(AtomicBool::new(true)), // s_r: s_r.clone(),
+            member_struct_ssrc: Arc::new(RwLock::new(HashMap::new())),
+            member_struct_id: Arc::new(RwLock::new(HashMap::new())),
         };
 
         me.spawn_task((s_r.0.clone(), s_r.1.clone())).await;
@@ -131,7 +122,6 @@ impl Receiver {
         let clone_now = self.now.clone();
         let clone_file = self.file_name.clone();
         let clone_user_id = self.ssrc_ffmpeg_hashmap.clone();
-        let clone_only_user = self.was_only_user.clone();
         let clone_pool = self.pool.clone();
 
         tokio::task::spawn(async move {
@@ -139,10 +129,10 @@ impl Receiver {
             let clo_now = clone_now;
             let clo_file = clone_file;
             let clo_user_id = clone_user_id;
-            let clo_only_user = clone_only_user;
             let clo_pool = clone_pool;
             let mut receiver_receiver = s_r.1.subscribe();
             loop {
+                // Temporary solution. We wait and hopefully the file is processed
                 let res = receiver_receiver.recv().await.unwrap();
                 if res == 1 {
                     info!("RES == 1");
@@ -151,63 +141,12 @@ impl Receiver {
                     s_r.0.send(2).unwrap();
                 } else if res == 2 {
                     info!("RES == 2");
-                    // HERE
-                    // let child = clo.lock().await.remove(&0).unwrap();
-                    // let mut lock = clo_ffmpeg.write().await;
-                    // let iter = lock.drain();
-
-                    // for (key, child) in iter {
-                    //     let output = child.wait_with_output().await.unwrap();
-
-                    //     let lock_now = clo_now.read().await;
-                    //     let now = lock_now.get(&key).unwrap();
-
-                    //     let time_elapsed = chrono::Utc::now()
-                    //         .signed_duration_since(*now)
-                    //         .num_milliseconds();
-
-                    //     let lock_file: tokio::sync::RwLockReadGuard<'_, HashMap<u32, String>> =
-                    //         clo_file.read().await;
-                    //     let file_name = lock_file.get(&key).unwrap();
-
-                    //     let last_person_in_channel = { clo_user_id.read().await.len() == 0 };
-
-                    //     let state = {
-                    //         let was_only_user =
-                    //             clo_only_user.load(std::sync::atomic::Ordering::SeqCst);
-
-                    //         if last_person_in_channel && was_only_user {
-                    //             // IF user was last in the channel AND he ws the only user in the channel
-                    //             4
-                    //         } else if last_person_in_channel {
-                    //             3
-                    //         } else {
-                    //             2
-                    //         }
-                    //     };
-
-                    //     match sqlx::query!(
-                    //         "UPDATE audio_files
-                    // 		SET end_ts = audio_files.start_ts + $1, state = $2
-                    // 		WHERE file_name = $3",
-                    //         time_elapsed,
-                    //         state,
-                    //         file_name
-                    //     )
-                    //     .execute(&clo_pool)
-                    //     .await
-                    //     {
-                    //         Ok(ok) => ok,
-                    //         Err(err) => {
-                    //             error!("{}", err);
-                    //             panic!()
-                    //         }
-                    //     };
-                    // }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
 
                     s_r.0.send(1).unwrap();
                 } else {
                     info!("Unkown code");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
 
                     s_r.0.send(2).unwrap();
                 }
@@ -257,31 +196,15 @@ impl VoiceEventHandler for Receiver {
                         // self.ssrc_hashmap.lock().await.insert(*ssrc, None);
                     }
                 } else {
+                    let now = chrono::Utc::now();
+
                     {
                         self.buffer.lock().await.insert(*ssrc, vec![]);
                     }
                     info!("is NOT bot");
-                    // no user in map add
-                    {
-                        // Have to clone outisde the task
-                        // let ssrc_clone = ssrc.clone();
-                        // let (tx, rx) = mpsc::channel::<CustomMsg>(32);
-                        // let task = self.spawn_task(ssrc_clone, rx).await;
-
-                        // let data = SsrcStruct {
-                        //     handle: task,
-                        //     user_id: Some(user_id.unwrap().0),
-                        //     tx,
-                        // };
-
-                        // self.ssrc_hashmap.lock().await.insert(*ssrc, data);
-                    }
 
                     let is_channel_empty = {
                         let len = self.user_id_hashmap.read().await.len();
-                        self.was_only_user
-                            .store(!(len > 0), std::sync::atomic::Ordering::SeqCst);
-
                         len == 0
                     };
 
@@ -317,9 +240,31 @@ impl VoiceEventHandler for Receiver {
                                 is_channel_empty,
                             )
                             .await;
-
                             let child = spawn_ffmpeg(&path);
 
+                            // let vec = Arc::new(VoiceChannelMembersData {
+                            //     buffer: vec![],
+                            //     file_name: "".to_string(),
+                            //     now: now,
+                            //     ssrc: *ssrc,
+                            //     ffmpeg_handle: child,
+                            // });
+
+                            // {
+                            //     let a = self
+                            //         .member_struct_id
+                            //         .write()
+                            //         .await
+                            //         .insert(user_id.unwrap().0, vec.clone());
+                            // }
+
+                            // {
+                            //     let b = self
+                            //         .member_struct_ssrc
+                            //         .write()
+                            //         .await
+                            //         .insert(*ssrc, vec.clone());
+                            // }
                             self.ssrc_ffmpeg_hashmap.write().await.insert(*ssrc, child);
 
                             info!("1 file created for ssrc: {}", *ssrc);
@@ -383,23 +328,23 @@ impl VoiceEventHandler for Receiver {
                 // You will typically need to map the User ID to their SSRC; observed when
                 // speaking or connecting.
 
-                {
-                    // Bots
-                    let get_user_hashmap = self.user_id_hashmap.read().await;
-                    if let Some(get_user_ssrc) = get_user_hashmap.get(&user_id.0) {
-                        let mut get_user_ssrc_hashmap = self.ssrc_hashmap.write().await;
-                        if let Some(data) = get_user_ssrc_hashmap.remove(get_user_ssrc) {
-                            if data.user_id.is_none() {
-                                // bot ignore
-                                info!("bot ignore");
-                            }
-                        } else {
-                            error!("no ssrc in hashmap");
-                        }
-                    } else {
-                        error!("no user id in hashmap");
-                    }
-                }
+                // {
+                //     // Bots
+                //     let get_user_hashmap = self.user_id_hashmap.read().await;
+                //     if let Some(get_user_ssrc) = get_user_hashmap.get(&user_id.0) {
+                //         let mut get_user_ssrc_hashmap = self.ssrc_hashmap.write().await;
+                //         if let Some(data) = get_user_ssrc_hashmap.remove(get_user_ssrc) {
+                //             if data.user_id.is_none() {
+                //                 // bot ignore
+                //                 info!("bot ignore");
+                //             }
+                //         } else {
+                //             error!("no ssrc in hashmap");
+                //         }
+                //     } else {
+                //         error!("no user id in hashmap");
+                //     }
+                // }
 
                 {
                     let ssrc = match self.user_id_hashmap.write().await.remove(&user_id.0) {
@@ -434,13 +379,7 @@ impl VoiceEventHandler for Receiver {
                     let last_person_in_channel = { self.user_id_hashmap.read().await.len() == 0 };
                     // 2 = JOINED 3 = LAST 4 = FIRST_LAST
                     let state = {
-                        let was_only_user =
-                            self.was_only_user.load(std::sync::atomic::Ordering::SeqCst);
-
-                        if last_person_in_channel && was_only_user {
-                            // IF user was last in the channel AND he ws the only user in the channel
-                            4
-                        } else if last_person_in_channel {
+                        if last_person_in_channel {
                             3
                         } else {
                             2
@@ -449,34 +388,25 @@ impl VoiceEventHandler for Receiver {
 
                     match sqlx::query!(
                         "UPDATE audio_files
-						SET end_ts = audio_files.start_ts + $1, state = $2
+						SET end_ts = audio_files.start_ts + $1, state_leave = $2
 						WHERE file_name = $3",
                         time_elapsed,
                         state,
                         file_name
                     )
-                    .execute(&__self.pool)
+                    .execute(&self.pool)
                     .await
                     {
-                        Ok(ok) => ok,
+                        Ok(ok) => {
+                            info!("Updated table row");
+                            ok
+                        }
                         Err(err) => {
                             error!("{}", err);
                             panic!()
                         }
                     };
-
-                    // TODO: Remove
-                    // info!(
-                    //     "stdout from wait_with_output {}",
-                    //     String::from_utf8(output.stdout).unwrap()
-                    // );
-                    // info!(
-                    //     "stderr from wait_with_output {}",
-                    //     String::from_utf8(output.stderr).unwrap()
-                    // );
                 }
-
-                // self.leave_voice_channel().await;
             }
             _ => {
                 // We won't be registering this struct for any more event classes.
@@ -578,7 +508,7 @@ async fn create_path(
 
     match sqlx::query!(
         "INSERT INTO audio_files 
-	(file_name, guild_id, channel_id, user_id, year, month, start_ts, end_ts, state) VALUES 
+	(file_name, guild_id, channel_id, user_id, year, month, start_ts, end_ts, state_enter) VALUES 
 	($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         file_name,
         guild_id.get() as i64,
