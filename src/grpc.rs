@@ -13,7 +13,7 @@ use crate::Custom;
 use serenity::prelude::{RwLock, TypeMap};
 use songbird::SongbirdKey;
 
-use crate::events::voice::CLIPS_FILE_PATH;
+use crate::events::voice_receiver::CLIPS_FILE_PATH;
 
 use self::hello_world::jam_response::JamResponseEnum;
 use self::hello_world::{JamData, JamResponse};
@@ -82,8 +82,6 @@ impl Jammer for MyJammer {
                             return Ok(Response::new(reply));
                         }
                     }
-
-                    // info!("members: {:#?}", res);
                 }
                 _ => {}
             }

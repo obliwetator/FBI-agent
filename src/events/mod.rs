@@ -10,3 +10,4 @@ pub mod messages;
 pub mod reactions;
 pub mod roles;
 pub mod voice;
+pub mod voice_receiver;
