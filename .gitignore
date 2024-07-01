@@ -2,4 +2,6 @@
 .env
 /src/config.rs
 /voice_recordings
+/no_silence_voice_recordings
+/voice_recordings_v2
 /clips

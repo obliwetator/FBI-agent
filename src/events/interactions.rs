@@ -3,10 +3,11 @@ use serenity::{
     builder::{CreateInteractionResponse, CreateInteractionResponseMessage},
     client::Context,
 };
+use tracing::info;
 
 use crate::event_handler::Handler;
 
-use super::voice::RECORDING_FILE_PATH;
+use super::voice_receiver::RECORDING_FILE_PATH;
 
 pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Interaction) {
     match interaction {

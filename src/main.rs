@@ -2,15 +2,12 @@
 #![allow(unused_variables)]
 use std::{collections::HashMap, sync::Arc};
 
-use serenity::{
-    all::ApplicationId, client::Cache, http::Http, model::channel::Message, prelude::*,
-    Result as SerenityResult,
-};
+use serenity::{all::ApplicationId, client::Cache, http::Http, prelude::*};
 use songbird::{driver::DecodeMode, Config, SerenityInit};
 use sqlx::postgres::PgPoolOptions;
 use tonic::transport::Server;
 use tracing::{info, Level};
-use tracing_subscriber::{prelude::*, FmtSubscriber};
+use tracing_subscriber::FmtSubscriber;
 
 use crate::{
     event_handler::Handler,
@@ -107,10 +104,10 @@ async fn main() {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    tracing::log::info!("yak shaving completed.");
+    info!("yak shaving completed.");
     // create relevant folders
-    if !std::path::Path::new(events::voice::RECORDING_FILE_PATH).exists() {
-        match tokio::fs::create_dir_all(events::voice::RECORDING_FILE_PATH).await {
+    if !std::path::Path::new(events::voice_receiver::RECORDING_FILE_PATH).exists() {
+        match tokio::fs::create_dir_all(events::voice_receiver::RECORDING_FILE_PATH).await {
             Ok(_) => {}
             Err(err) => {
                 panic!("cannot create path: {}", err)
@@ -167,23 +164,6 @@ async fn main() {
         client.start().await.unwrap();
     });
 
-    // // client.cache_and_http.cache.guild(id)
-    // let two = tokio::spawn(async move {
-    //     // build our application with a route
-    //     let app = Router::new().route("/", get(root)).with_state(&custom);
-
-    //     // `GET /` goes to `root`
-
-    //     // run our app with hyper
-    //     // `axum::Server` is a re-export of `hyper::Server`
-    //     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    //     tracing::debug!("listening on {}", addr);
-    //     axum::Server::bind(&addr)
-    //         .serve(app.into_make_service())
-    //         .await
-    //         .unwrap();
-    // });
-
     let three = tokio::spawn(async move {
         let addr = "[::1]:50052".parse().unwrap();
 
@@ -198,18 +178,4 @@ async fn main() {
     });
 
     let (first, third) = tokio::join!(one, three);
-
-    // // Finally, start a single shard, and start listening to events.
-    // //
-    // // Shards will automatically attempt to reconnect, and will perform
-    // // exponential backoff until it reconnects.
-    // if let Err(why) = client.start().await {
-    //     info!("Client error: {:?}", why);
-    // }
-}
-
-pub fn check_msg(result: SerenityResult<Message>) {
-    if let Err(why) = result {
-        info!("Error sending message: {:?}", why);
-    }
 }

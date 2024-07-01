@@ -6,36 +6,39 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serenity = { version = "0.11", default-features = false, features = [
-    "builder",
+serenity = { version = "0.12", default-features = false, features = [
+	"builder",
 	"voice",
-    "client",
-    "gateway",
+	"client",
+	"gateway",
 	"cache",
-    "http",
-    "model",
-    "utils",
-    "rustls_backend",
-	"unstable_discord_api"
-]}
-tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
-songbird = {version = "0.3.0", features = ["driver", "builtin-queue"]}
-# sqlx = { version = "0.5", features = [ "mysql", "runtime-tokio-native-tls", "offline" ] }
+	"http",
+	"model",
+	"utils",
+	"rustls_backend",
+	"unstable_discord_api",
+] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "tracing"] }
+songbird = { version = "0.4", features = [
+	"driver",
+	"builtin-queue",
+	"receive",
+	"simd-json",
+] }
 serde_json = "1.0"
-sqlx = { version = "0.6", features = [ "runtime-actix-native-tls" , "postgres" ] }
-reqwest = "0.11"
-regex = "1.7.0"
-wav = "1.0.0"
-byteorder = "1.4.3"
+sqlx = { version = "0.6", features = ["runtime-actix-native-tls", "postgres"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 chrono = "0.4"
-actix-web = "4"
-axum="0.6"
-serde="1"
+# actix-web = "4"
+# axum="0.6"
+serde = "1"
 serde_repr = "0.1"
-tonic="0.8"
+tonic = "0.8"
 prost = "0.11"
+crossbeam = { version = "0.8.2", features = ["crossbeam-channel"] }
+console-subscriber = "0.2.0"
+
 
 [build-dependencies]
 tonic-build = "0.8"
