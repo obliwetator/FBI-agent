@@ -2,6 +2,7 @@ pub mod channels;
 
 use crate::event_handler::Handler;
 use serenity::{
+    all::UnavailableGuild,
     model::prelude::{Guild, GuildId},
     prelude::Context,
 };
@@ -149,7 +150,6 @@ async fn update_channels(guild_cached: &Vec<Guild>, handler: &Handler) {
 
         query_builder
             .push_values(ch.into_iter().take(BIND_LIMIT / 4), |mut b, channel| {
-                let value = channel.1.kind;
                 b.push_bind(channel.1.id.get() as i64)
                     .push_bind(channel.1.guild_id.get() as i64)
                     .push_bind(u8::from(channel.1.kind) as i32)
@@ -161,4 +161,22 @@ async fn update_channels(guild_cached: &Vec<Guild>, handler: &Handler) {
 
         let res = query.execute(&handler.database).await.unwrap();
     }
+}
+
+pub async fn update_guild_present(guilds: Vec<UnavailableGuild>, handler: &Handler) {
+    // TODO. We only check the guild we are currently in. Check if the bot has left/kicked from any guild.
+    let mut query_builder: sqlx::QueryBuilder<Postgres> =
+        sqlx::QueryBuilder::new("INSERT INTO guilds_present (guild_id) ");
+
+    query_builder
+        .push_values(guilds.into_iter().take(BIND_LIMIT), |mut b, guild| {
+            let value = guild.id.get();
+
+            b.push_bind(guild.id.get() as i64);
+        })
+        .push(" ON CONFLICT (guild_id) DO NOTHING");
+
+    let query = query_builder.build();
+
+    let res = query.execute(&handler.database).await.unwrap();
 }

@@ -367,6 +367,7 @@ impl EventHandler for Handler {
         info!("{} is connected!", ready.user.name);
 
         let guild_id = GuildId::new(362257054829641758);
+        database::update_guild_present(ready.guilds, self).await;
 
         // let commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
         //     commands
