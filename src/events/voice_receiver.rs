@@ -184,13 +184,18 @@ impl VoiceEventHandler for Receiver {
                     user_id, ssrc, speaking,
                 );
 
-                let member = self
+                let guild = self
                     .inner
                     .ctx_main
                     .cache
-                    .member(self.inner.guild_id, user_id.unwrap().0)
+                    .guild(self.inner.guild_id)
                     .unwrap()
                     .to_owned();
+
+                let member = guild
+                    .member(&self.inner.ctx_main, user_id.unwrap().0)
+                    .await
+                    .unwrap();
 
                 if member.user.bot {
                     info!("is a bot");
