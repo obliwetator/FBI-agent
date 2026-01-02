@@ -1,17 +1,17 @@
 // use std::env;
 #![allow(unused_variables)]
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, env, sync::Arc};
 
 use serenity::{all::ApplicationId, client::Cache, http::Http, prelude::*};
-use songbird::{driver::DecodeMode, Config, SerenityInit};
+use songbird::{Config, SerenityInit, driver::DecodeMode};
 use sqlx::postgres::PgPoolOptions;
 use tonic::transport::Server;
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::{
     event_handler::Handler,
-    grpc::{hello_world::jammer_server::JammerServer, MyJammer},
+    grpc::{MyJammer, hello_world::jammer_server::JammerServer},
 };
 
 // use crate::http::hello;
@@ -72,7 +72,11 @@ pub async fn get_lock_read(ctx: &Context) -> Arc<RwLock<HashMap<u64, Option<u64>
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
     // install global collector configured based on RUST_LOG env var.
+    unsafe { env::set_var("RUST_BACKTRACE", "1") };
     let subscriber = FmtSubscriber::builder()
         // .with_thread_names(true)
         // .with_file(true)
@@ -103,8 +107,6 @@ async fn main() {
     //     .init();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    info!("yak shaving completed.");
     // create relevant folders
     if !std::path::Path::new(events::voice_receiver::RECORDING_FILE_PATH).exists() {
         match tokio::fs::create_dir_all(events::voice_receiver::RECORDING_FILE_PATH).await {
