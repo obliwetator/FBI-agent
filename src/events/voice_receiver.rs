@@ -3,12 +3,11 @@ use serenity::{
     async_trait,
     client::Context,
     model::id::{ChannelId, GuildId},
-    prelude::Mutex,
 };
 use songbird::{
+    Event, EventContext, EventHandler as VoiceEventHandler,
     events::context_data::{ConnectData, DisconnectData},
     model::payload::{ClientDisconnect, Speaking},
-    Event, EventContext, EventHandler as VoiceEventHandler,
 };
 use sqlx::{Pool, Postgres};
 use std::sync::Arc;
@@ -30,18 +29,13 @@ pub struct Receiver {
 
 pub struct InnerReceiver {
     pool: Pool<Postgres>,
-    buffer: Arc<Mutex<HashMap<u32, Vec<i16>>>>,
     channel_id: ChannelId,
     ctx_main: Arc<Context>,
     now: Arc<RwLock<HashMap<u32, chrono::DateTime<chrono::Utc>>>>,
     file_name: Arc<RwLock<HashMap<u32, String>>>,
     guild_id: GuildId,
-    // ssrc
     ssrc_ffmpeg_hashmap: Arc<RwLock<HashMap<u32, Child>>>,
-    // user_id
     user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
-    // member_struct_ssrc: Arc<RwLock<HashMap<u32, Arc<VoiceChannelMembersData>>>>,
-    // member_struct_id: Arc<RwLock<HashMap<u64, Arc<VoiceChannelMembersData>>>>,
 }
 
 #[allow(dead_code)]
@@ -50,7 +44,18 @@ struct VoiceChannelMembersData {
     file_name: String,
     ssrc: u32,
     ffmpeg_handle: Child,
-    buffer: Vec<i16>,
+}
+
+impl Drop for Receiver {
+    fn drop(&mut self) {
+        info!("Receiver dropped");
+    }
+}
+
+impl Drop for InnerReceiver {
+    fn drop(&mut self) {
+        info!("Inner Receiver dropped");
+    }
 }
 
 impl Receiver {
@@ -77,36 +82,17 @@ impl Receiver {
                 ctx_main: ctx,
                 user_id_hashmap: Arc::new(RwLock::new(HashMap::new())),
                 ssrc_ffmpeg_hashmap: Arc::new(RwLock::new(HashMap::new())),
-                // now: Arc::new(Mutex::new(HashMap::new())),
                 guild_id,
                 channel_id,
-                buffer: Arc::new(Mutex::new(HashMap::new())),
                 // member_struct_ssrc: Arc::new(RwLock::new(HashMap::new())),
                 // member_struct_id: Arc::new(RwLock::new(HashMap::new())),
             }),
         };
 
-        // me.spawn_task((s_r.0.clone(), s_r.1.clone())).await;
+        me.spawn_task((s_r.0.clone(), s_r.1.clone())).await;
 
         me
     }
-
-    // pub async fn leave_voice_channel(&self) {
-    //     {
-    //         info!(
-    //             "Size of ssrc hashmap: {}",
-    //             self.inner.ssrc_hashmap.lock().await.len()
-    //         );
-    //     }
-
-    //     if self.inner.ssrc_hashmap.lock().await.is_empty() {
-    //         info!("Disconnect self");
-    //         // disconnect self.inner.
-    //         // might be optional
-    //         let manager = songbird::get(&self.inner.ctx_main).await.unwrap();
-    //         // let _ = manager.remove(self.inner.guild_id).await;
-    //     }
-    // }
 
     pub async fn spawn_task(
         &self,
@@ -137,15 +123,9 @@ impl Receiver {
                 // Temporary solution. We wait and hopefully the file is processed
                 let res = receiver_receiver.recv().await.unwrap();
                 if res == 1 {
-                    info!("RES == 1");
                     tokio::time::sleep(Duration::from_secs(10)).await;
 
                     s_r.0.send(2).unwrap();
-                } else if res == 2 {
-                    info!("RES == 2");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-
-                    s_r.0.send(1).unwrap();
                 } else {
                     info!("Unknown code");
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -184,6 +164,11 @@ impl VoiceEventHandler for Receiver {
                     user_id, ssrc, speaking,
                 );
 
+                let Some(user_id) = user_id else {
+                    error!("No user_id in SpeakingStateUpdate");
+                    return None;
+                };
+
                 let guild = self
                     .inner
                     .ctx_main
@@ -192,23 +177,17 @@ impl VoiceEventHandler for Receiver {
                     .unwrap()
                     .to_owned();
 
-                let member = guild
-                    .member(&self.inner.ctx_main, user_id.unwrap().0)
-                    .await
-                    .unwrap();
+                let member = match guild.member(&self.inner.ctx_main, user_id.0).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        error!("Failed to get member: {}", e);
+                        return None;
+                    }
+                };
 
                 if member.user.bot {
                     info!("is a bot");
-                    // Don't record bots
-                    {
-                        // self.inner.ssrc_hashmap.lock().await.insert(*ssrc, None);
-                    }
                 } else {
-                    let now = chrono::Utc::now();
-
-                    {
-                        self.inner.buffer.lock().await.insert(*ssrc, vec![]);
-                    }
                     info!("is NOT bot");
 
                     let is_channel_empty = {
@@ -221,10 +200,8 @@ impl VoiceEventHandler for Receiver {
                             .user_id_hashmap
                             .write()
                             .await
-                            .insert(user_id.unwrap().0, *ssrc);
+                            .insert(user_id.0, *ssrc);
                     }
-
-                    // self.inner.was_only_user = { self.inner.user_id_hashmap };
 
                     {
                         if self
@@ -252,7 +229,7 @@ impl VoiceEventHandler for Receiver {
                                 *ssrc,
                                 self.inner.guild_id,
                                 self.inner.channel_id,
-                                user_id.unwrap().0,
+                                user_id.0,
                                 &member,
                                 is_channel_empty,
                             )
@@ -277,17 +254,7 @@ impl VoiceEventHandler for Receiver {
                 for (ssrc, data) in &tick.speaking {
                     if let Some(child) = self.inner.ssrc_ffmpeg_hashmap.write().await.get_mut(ssrc)
                     {
-                        // let mut buffer = self.inner.buffer.lock().await;
-                        // let res = buffer.get_mut(ssrc).unwrap();
                         if let Some(stdin) = child.stdin.as_mut() {
-                            // let mut result: Vec<u8> = Vec::new();
-
-                            // let _ = result.write_all(rtp.payload()).await;
-
-                            // for &n in audio_i16 {
-                            //     // TODO: Use buffer
-                            //     let _ = result.write_i16_le(n).await;
-                            // }
                             if let Some(decoded_voice) = data.decoded_voice.as_ref() {
                                 let mut result: Vec<u8> = Vec::new();
 
@@ -352,76 +319,69 @@ impl VoiceEventHandler for Receiver {
 
             Ctx::ClientDisconnect(ClientDisconnect { user_id }) => {
                 error!("client disconnected id: {}", user_id);
-                // You can implement your own logic here to handle a user who has left the
-                // voice channel e.g., finalise processing of statistics etc.
-                // You will typically need to map the User ID to their SSRC; observed when
-                // speaking or connecting.
-
-                // {
-                //     // Bots
-                //     let get_user_hashmap = self.inner.user_id_hashmap.read().await;
-                //     if let Some(get_user_ssrc) = get_user_hashmap.get(&user_id.0) {
-                //         let mut get_user_ssrc_hashmap = self.inner.ssrc_hashmap.write().await;
-                //         if let Some(data) = get_user_ssrc_hashmap.remove(get_user_ssrc) {
-                //             if data.user_id.is_none() {
-                //                 // bot ignore
-                //                 info!("bot ignore");
-                //             }
-                //         } else {
-                //             error!("no ssrc in hashmap");
-                //         }
-                //     } else {
-                //         error!("no user id in hashmap");
-                //     }
-                // }
 
                 let ssrc = match self.inner.user_id_hashmap.write().await.remove(&user_id.0) {
                     Some(ok) => ok,
                     None => {
                         info!("tried to remove bot");
-                        // self.inner.leave_voice_channel().await;
                         return None;
                     }
                 };
 
-                let child = self
-                    .inner
-                    .ssrc_ffmpeg_hashmap
-                    .write()
-                    .await
-                    .remove(&ssrc)
-                    .unwrap();
+                let mut child = match self.inner.ssrc_ffmpeg_hashmap.write().await.remove(&ssrc) {
+                    Some(c) => c,
+                    None => {
+                        error!("No child process found for ssrc {}", ssrc);
+                        return None;
+                    }
+                };
 
                 info!("wait for child");
-                let output = child.wait_with_output().await.unwrap();
+                // Close stdin so ffmpeg knows the stream has ended and can exit
+                drop(child.stdin.take());
+
+                // Note: waiting with output requires stderr/stdout to be properly piped
+                // otherwise this can hang or fail
+                let output = match child.wait_with_output().await {
+                    Ok(out) => out,
+                    Err(e) => {
+                        error!("Failed to wait for child process: {}", e);
+                        return None;
+                    }
+                };
                 info!("wait is over");
 
-                let stdout = String::from_utf8(output.stdout);
-                let stderr = String::from_utf8(output.stderr);
+                let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+                let stderr = String::from_utf8(output.stderr).unwrap_or_default();
 
                 info!("stdout {:#?}", stdout);
                 info!("stderr {:#?}", stderr);
 
                 let lock_now = self.inner.now.read().await;
-                let now = lock_now.get(&ssrc).unwrap();
-
+                let now = match lock_now.get(&ssrc) {
+                    Some(t) => t,
+                    None => {
+                        error!("No start time found for ssrc {}", ssrc);
+                        return None;
+                    }
+                };
                 let time_elapsed = chrono::Utc::now()
                     .signed_duration_since(*now)
                     .num_milliseconds();
 
                 let lock_file: tokio::sync::RwLockReadGuard<'_, HashMap<u32, String>> =
                     self.inner.file_name.read().await;
-                let file_name = lock_file.get(&ssrc).unwrap();
+                let file_name = match lock_file.get(&ssrc) {
+                    Some(f) => f,
+                    None => {
+                        error!("No file name found for ssrc {}", ssrc);
+                        return None;
+                    }
+                };
 
                 let last_person_in_channel = { self.inner.user_id_hashmap.read().await.len() == 0 };
                 // 2 = JOINED 3 = LAST
-                let state = {
-                    if last_person_in_channel {
-                        3
-                    } else {
-                        2
-                    }
-                };
+                let state = { if last_person_in_channel { 3 } else { 2 } };
 
                 info!("File name :{}", file_name);
 
@@ -472,9 +432,9 @@ fn spawn_ffmpeg(path: &str) -> Child {
         .args(["-flush_packets", "1"]) // Write to the file on every packet. While this is wasteful it allows semi realtime audio playback.
         .arg(format!("{}.ogg", path)) // output
         .stdin(std::process::Stdio::piped())
-        // The command will hangup if the pipe is not consumed. So set it to null if we are not doing anything with it.
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        // We read from stdout/stderr later with wait_with_output, so they must be piped
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
         .spawn();
 
     command.unwrap()
@@ -535,12 +495,10 @@ async fn create_path(
     );
 
     // Try to create the dir in case it does not exist
-    // Delete the
-    match std::fs::create_dir_all(dir_path) {
-        Ok(_) => {}
-        Err(err) => {
-            panic!("cannot create path: {}", err);
-        }
+    if let Err(err) = std::fs::create_dir_all(&dir_path) {
+        error!("cannot create path {}: {}", dir_path, err);
+        // Returning an empty string or handling this more gracefully might be better
+        // but for now we avoid panicking the whole application.
     };
 
     let null: Option<i64> = None;

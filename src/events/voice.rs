@@ -1,5 +1,5 @@
 use crate::{
-    event_handler::Handler, events::voice_receiver::Receiver, get_lock_read, MpmcChannels,
+    MpmcChannels, event_handler::Handler, events::voice_receiver::Receiver, get_lock_read,
 };
 use serenity::{
     client::Context,
@@ -48,17 +48,19 @@ pub async fn voice_state_update(
         }
 
         if let Some(old) = old_state {
-            if new_state.channel_id.is_some() {
-                // We can check for various things that happened after the user has connected
-                // We don't care about any events at the moment
-                if new_state.channel_id.unwrap() == old.channel_id.unwrap() {
-                    // An action happened that was NOT switching channels.
-                    // We don't care about those
-                    info!("An action happened that was NOT switching channels");
-                    return;
-                } else if new_state.channel_id.unwrap() != old.channel_id.unwrap() {
-                    // user switched channels
-                    info!("user switched channels");
+            if let Some(new_channel_id) = new_state.channel_id {
+                if let Some(old_channel_id) = old.channel_id {
+                    // We can check for various things that happened after the user has connected
+                    // We don't care about any events at the moment
+                    if new_channel_id == old_channel_id {
+                        // An action happened that was NOT switching channels.
+                        // We don't care about those
+                        info!("An action happened that was NOT switching channels");
+                        return;
+                    } else {
+                        // user switched channels
+                        info!("user switched channels");
+                    }
                 }
             }
         }
@@ -113,10 +115,30 @@ async fn handle_no_people_in_channel(
         // TODO: There can be other people in different channels. Check for this
 
         // get the channel id that user was in before disconnecting
-        if let Some(channel_id) = old_state.as_ref().unwrap().channel_id {
-            let current_channel = channel_id.to_channel(&ctx).await.unwrap();
-            let guild_channel = current_channel.guild().unwrap();
-            let vec = guild_channel.members(&ctx).unwrap();
+        if let Some(channel_id) = old_state.as_ref().and_then(|s| s.channel_id) {
+            let current_channel = match channel_id.to_channel(&ctx).await {
+                Ok(ch) => ch,
+                Err(err) => {
+                    error!("Could not resolve current channel: {}", err);
+                    return false;
+                }
+            };
+
+            let guild_channel = match current_channel.guild() {
+                Some(gc) => gc,
+                None => {
+                    error!("Not a guild channel");
+                    return false;
+                }
+            };
+
+            let vec = match guild_channel.members(&ctx) {
+                Ok(m) => m,
+                Err(err) => {
+                    error!("Could not get channel members: {}", err);
+                    return false;
+                }
+            };
             // Get all users in the channel
             let members: Vec<Member> = vec
                 .into_iter()
@@ -126,10 +148,10 @@ async fn handle_no_people_in_channel(
 
             // No Human users left, just the bot is left
             if members.len() == 0 {
-                info!("No more human users left. Leaving channel");
+                // info!("No more human users left. Leaving channel");
                 return true;
             } else {
-                trace!("Human users still in channel.");
+                // trace!("Human users still in channel.");
                 return false;
             }
         }
@@ -143,11 +165,16 @@ async fn get_channel_with_most_members(
 ) -> Option<(ChannelId, usize)> {
     let lock = get_lock_read(ctx).await;
 
+    let guild_id = match new_state.guild_id {
+        Some(id) => id,
+        None => return None,
+    };
+
     let lock_guard = lock.read().await;
-    let afk_channel_id_option = lock_guard.get(&new_state.guild_id.unwrap().get()).unwrap();
+    let afk_channel_id_option = lock_guard.get(&guild_id.get()).copied().unwrap_or(None);
     let all_channels = &ctx
         .cache
-        .guild(new_state.guild_id.unwrap())
+        .guild(guild_id)
         .expect("cannot clone guild from cache")
         .channels;
     let mut highest_channel_id: ChannelId = ChannelId::new(1);
@@ -155,7 +182,7 @@ async fn get_channel_with_most_members(
     for (channel_id, guild_channel) in all_channels {
         if let Some(afk_channel_id) = afk_channel_id_option {
             // Ignore channels that are meant for afk
-            if *afk_channel_id == channel_id.get() {
+            if afk_channel_id == channel_id.get() {
                 info!("Ignore AFK channel");
                 continue;
             }
@@ -190,7 +217,6 @@ async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
                 .expect("Expected struct")
                 .clone()
         };
-
         let mut hash_map = lock.write().await;
         let (handler, receiver) = hash_map
             .remove(&guild_id.get())
@@ -216,6 +242,7 @@ pub async fn connect_to_voice_channel(
     channel_id: ChannelId,
     user_id: u64,
 ) {
+    info!("Connecting to voice channel");
     let manager = songbird::get(ctx)
         .await
         .expect("Songbird Voice client placed in at initialisation.")
@@ -267,15 +294,7 @@ async fn join_ch(
     let mut hash_map = lock.write().await;
     let channel = {
         let result = match hash_map.get(&guild_id.get()) {
-            Some(ok) => {
-                // info!("channels already exists");
-
-                // let handler = ok.0.clone();
-                // let receiver = ok.1.clone();
-                // handle_graceful_shutdown(handler, receiver, 2).await;
-
-                ok
-            }
+            Some(ok) => ok,
             None => {
                 info!("new channels");
                 let (sender_for_handler, _) = tokio::sync::broadcast::channel::<i32>(10);
