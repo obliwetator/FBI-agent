@@ -1,6 +1,4 @@
-use crate::{
-    MpmcChannels, event_handler::Handler, events::voice_receiver::Receiver, get_lock_read,
-};
+use crate::{event_handler::Handler, events::voice_receiver::Receiver, get_lock_read};
 use serenity::{
     client::Context,
     model::{
@@ -11,7 +9,7 @@ use serenity::{
 use songbird::CoreEvent;
 use sqlx::{Pool, Postgres};
 use std::sync::Arc;
-use tracing::{error, info, trace};
+use tracing::{error, info};
 
 pub async fn voice_server_update(
     _self: &Handler,
@@ -209,22 +207,6 @@ async fn get_channel_with_most_members(
 }
 
 async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
-    {
-        let lock = {
-            let data_read = ctx.data.read().await;
-            data_read
-                .get::<MpmcChannels>()
-                .expect("Expected struct")
-                .clone()
-        };
-        let mut hash_map = lock.write().await;
-        let (handler, receiver) = hash_map
-            .remove(&guild_id.get())
-            .expect("channel not innitialized");
-
-        handle_graceful_shutdown(handler.clone(), receiver.clone(), 1).await;
-    }
-
     let manager = songbird::get(ctx)
         .await
         .expect("Songbird Voice client placed in at initialisation.")
@@ -283,30 +265,6 @@ async fn join_ch(
     user_id: u64,
     old_channel: Option<u64>,
 ) {
-    let lock = {
-        let data_read = ctx.data.read().await;
-        data_read
-            .get::<MpmcChannels>()
-            .expect("Expected struct")
-            .clone()
-    };
-
-    let mut hash_map = lock.write().await;
-    let channel = {
-        let result = match hash_map.get(&guild_id.get()) {
-            Some(ok) => ok,
-            None => {
-                info!("new channels");
-                let (sender_for_handler, _) = tokio::sync::broadcast::channel::<i32>(10);
-                let (sender_for_receiver, _) = tokio::sync::broadcast::channel::<i32>(10);
-                hash_map.insert(guild_id.get(), (sender_for_handler, sender_for_receiver));
-
-                hash_map.get(&guild_id.get()).unwrap()
-            }
-        };
-        (result.0.clone(), result.1.clone())
-    };
-
     let result_handler_lock = manager.join(guild_id, channel_id).await;
     match result_handler_lock {
         Ok(handler_lock) => {
@@ -315,36 +273,16 @@ async fn join_ch(
             if let Some(old_ch) = old_channel {
                 // switching channels. Don't re-register. Cleanup
                 info!("Clean up switching chanels");
-
-                // hash_map
-                //     .remove(&guild_id.0)
-                //     .expect("Expected key from old channel when switching channels");
             } else {
                 let mut handler = handler_lock.lock().await;
-                // let res = handler.join(channel_id).await;
-                // match res {
-                //     Ok(_) => {}
-                //     Err(err) => {
-                //         panic!("cannot join channel 1: {}", err);
-                //     }
-                // }
-                // Remove any old events in case the bot swaps channels
-                // handler.remove_all_global_events();
 
                 let ctx1 = Arc::new(ctx.clone());
-                let receiver =
-                    Receiver::new(pool, ctx1, guild_id, channel_id, Arc::new(channel)).await;
+                let receiver = Receiver::new(pool, ctx1, guild_id, channel_id).await;
 
                 handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
-
                 handler.add_global_event(CoreEvent::VoiceTick.into(), receiver.clone());
-
-                // handler.add_global_event(CoreEvent::RtpPacket.into(), receiver.clone());
-
                 handler.add_global_event(CoreEvent::RtcpPacket.into(), receiver.clone());
-
                 handler.add_global_event(CoreEvent::ClientDisconnect.into(), receiver.clone());
-
                 handler.add_global_event(CoreEvent::DriverConnect.into(), receiver.clone());
                 handler.add_global_event(CoreEvent::DriverReconnect.into(), receiver.clone());
                 handler.add_global_event(CoreEvent::DriverDisconnect.into(), receiver.clone());
@@ -354,42 +292,5 @@ async fn join_ch(
             manager.remove(guild_id).await.unwrap();
             panic!("cannot join channel 2: {}", err);
         }
-    }
-}
-
-// Events sent to the voice_state_update do not reach the bot voice receiver.
-// Since the logic for leaving the channel is in the voice_state_update we do not know the state of the receiver
-// As such we send effectivly a SIGTERM command.
-// The bot will disconnect itself when it has finished processing.
-async fn handle_graceful_shutdown(
-    handler: tokio::sync::broadcast::Sender<i32>,
-    receiver: tokio::sync::broadcast::Sender<i32>,
-    code: i32,
-) {
-    info!("handle graceful shutdown");
-    // Subscribe for a response
-    let mut r1 = handler.subscribe();
-
-    // Termination signal
-    match receiver.send(code) {
-        Ok(ok) => {
-            info!("Sent to {ok} receivers")
-        }
-        Err(_) => {
-            info!("No receivers to receive signal");
-            return;
-        }
-    }
-
-    // Get response
-    let res = r1.recv().await.unwrap();
-
-    if res == 2 {
-        info!("Response received, shutting down")
-    } else if res == 1 {
-        info!("Response received, cleanup complete")
-    } else {
-        error!("RES IS :{}", res);
-        panic!();
     }
 }

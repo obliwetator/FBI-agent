@@ -10,13 +10,13 @@ use songbird::{
     model::payload::{ClientDisconnect, Speaking},
 };
 use sqlx::{Pool, Postgres};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::{collections::HashMap, time::Duration};
+use tokio::sync::RwLock;
 use tokio::{
     io::AsyncWriteExt,
     process::{Child, Command},
 };
-use tokio::{sync::RwLock, task::JoinHandle};
 use tracing::{error, info};
 
 pub const RECORDING_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/voice_recordings";
@@ -34,7 +34,7 @@ pub struct InnerReceiver {
     now: Arc<RwLock<HashMap<u32, chrono::DateTime<chrono::Utc>>>>,
     file_name: Arc<RwLock<HashMap<u32, String>>>,
     guild_id: GuildId,
-    ssrc_ffmpeg_hashmap: Arc<RwLock<HashMap<u32, Child>>>,
+    ssrc_ffmpeg_hashmap: Arc<RwLock<HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
     user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
 }
 
@@ -64,17 +64,11 @@ impl Receiver {
         ctx: Arc<Context>,
         guild_id: GuildId,
         channel_id: ChannelId,
-        s_r: Arc<(
-            // Handler
-            tokio::sync::broadcast::Sender<i32>,
-            // Receiver
-            tokio::sync::broadcast::Sender<i32>,
-        )>,
     ) -> Self {
         // You can manage state here, such as a buffer of audio packet bytes, so
         // you can later store them in intervals.
 
-        let me: Receiver = Self {
+        Self {
             inner: Arc::new(InnerReceiver {
                 pool,
                 now: Arc::new(RwLock::new(HashMap::new())),
@@ -87,53 +81,7 @@ impl Receiver {
                 // member_struct_ssrc: Arc::new(RwLock::new(HashMap::new())),
                 // member_struct_id: Arc::new(RwLock::new(HashMap::new())),
             }),
-        };
-
-        me.spawn_task((s_r.0.clone(), s_r.1.clone())).await;
-
-        me
-    }
-
-    pub async fn spawn_task(
-        &self,
-        s_r: (
-            // Handler
-            tokio::sync::broadcast::Sender<i32>,
-            // Receiver
-            tokio::sync::broadcast::Sender<i32>,
-        ),
-    ) -> JoinHandle<()> {
-        info!("Spawn task");
-
-        let clone_ffmpeg = self.inner.ssrc_ffmpeg_hashmap.clone();
-        let clone_now = self.inner.now.clone();
-        let clone_file = self.inner.file_name.clone();
-        let clone_user_id = self.inner.ssrc_ffmpeg_hashmap.clone();
-        let clone_pool = self.inner.pool.clone();
-
-        tokio::task::spawn(async move {
-            let clo_ffmpeg = clone_ffmpeg;
-            let clo_now = clone_now;
-            let clo_file = clone_file;
-            let clo_user_id = clone_user_id;
-            let clo_pool = clone_pool;
-            let mut receiver_receiver = s_r.1.subscribe();
-            loop {
-                info!("ready to receive termination signal");
-                // Temporary solution. We wait and hopefully the file is processed
-                let res = receiver_receiver.recv().await.unwrap();
-                if res == 1 {
-                    tokio::time::sleep(Duration::from_secs(10)).await;
-
-                    s_r.0.send(2).unwrap();
-                } else {
-                    info!("Unknown code");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-
-                    s_r.0.send(2).unwrap();
-                }
-            }
-        })
+        }
     }
 }
 
@@ -234,12 +182,94 @@ impl VoiceEventHandler for Receiver {
                                 is_channel_empty,
                             )
                             .await;
-                            let child = spawn_ffmpeg(&path);
+                            let mut child = spawn_ffmpeg(&path);
+
+                            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+
                             self.inner
                                 .ssrc_ffmpeg_hashmap
                                 .write()
                                 .await
-                                .insert(*ssrc, child);
+                                .insert(*ssrc, tx);
+
+                            let inner_clone = self.inner.clone();
+                            let ssrc_clone = *ssrc;
+
+                            tokio::spawn(async move {
+                                if let Some(mut stdin) = child.stdin.take() {
+                                    while let Some(data) = rx.recv().await {
+                                        if let Err(e) = stdin.write_all(&data).await {
+                                            error!("Failed to write to ffmpeg stdin: {}", e);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                info!("wait for child");
+                                let output = match child.wait_with_output().await {
+                                    Ok(out) => out,
+                                    Err(e) => {
+                                        error!("Failed to wait for child process: {}", e);
+                                        return;
+                                    }
+                                };
+                                info!("wait is over");
+
+                                let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+                                let stderr = String::from_utf8(output.stderr).unwrap_or_default();
+
+                                info!("stdout {:#?}", stdout);
+                                info!("stderr {:#?}", stderr);
+
+                                let lock_now = inner_clone.now.read().await;
+                                let now = match lock_now.get(&ssrc_clone) {
+                                    Some(t) => t,
+                                    None => {
+                                        error!("No start time found for ssrc {}", ssrc_clone);
+                                        return;
+                                    }
+                                };
+                                let time_elapsed = chrono::Utc::now()
+                                    .signed_duration_since(*now)
+                                    .num_milliseconds();
+                                drop(lock_now);
+
+                                let lock_file = inner_clone.file_name.read().await;
+                                let file_name = match lock_file.get(&ssrc_clone) {
+                                    Some(f) => f.clone(),
+                                    None => {
+                                        error!("No file name found for ssrc {}", ssrc_clone);
+                                        return;
+                                    }
+                                };
+                                drop(lock_file);
+
+                                let last_person_in_channel =
+                                    { inner_clone.user_id_hashmap.read().await.len() == 0 };
+                                // 2 = JOINED 3 = LAST
+                                let state = { if last_person_in_channel { 3 } else { 2 } };
+
+                                info!("File name :{}", file_name);
+
+                                match sqlx::query!(
+                                    "UPDATE audio_files
+                                        SET end_ts = audio_files.start_ts + $1, state_leave = $2
+                                        WHERE file_name = $3",
+                                    time_elapsed,
+                                    state,
+                                    file_name
+                                )
+                                .execute(&inner_clone.pool)
+                                .await
+                                {
+                                    Ok(_) => {
+                                        info!("Updated table row");
+                                    }
+                                    Err(err) => {
+                                        error!("{}", err);
+                                    }
+                                };
+                            });
 
                             info!("1 file created for ssrc: {}", *ssrc);
                         }
@@ -252,28 +282,29 @@ impl VoiceEventHandler for Receiver {
             }
             Ctx::VoiceTick(tick) => {
                 for (ssrc, data) in &tick.speaking {
-                    if let Some(child) = self.inner.ssrc_ffmpeg_hashmap.write().await.get_mut(ssrc)
-                    {
-                        if let Some(stdin) = child.stdin.as_mut() {
-                            if let Some(decoded_voice) = data.decoded_voice.as_ref() {
-                                let mut result: Vec<u8> = Vec::new();
+                    let tx = {
+                        self.inner
+                            .ssrc_ffmpeg_hashmap
+                            .read()
+                            .await
+                            .get(ssrc)
+                            .cloned()
+                    };
 
-                                for &n in decoded_voice {
-                                    // TODO: Use buffer
-                                    let _ = result.write_i16_le(n).await;
-                                }
+                    if let Some(tx) = tx {
+                        if let Some(decoded_voice) = data.decoded_voice.as_ref() {
+                            let mut result: Vec<u8> = Vec::new();
 
-                                match stdin.write_all(&result).await {
-                                    Ok(_) => {}
-                                    Err(err) => {
-                                        error!("Could not write to stdin: {}", err)
-                                    }
-                                };
-                            } else {
-                                error!("Decode disabled");
+                            for &n in decoded_voice {
+                                // TODO: Use buffer
+                                let _ = result.write_i16_le(n).await;
+                            }
+
+                            if let Err(e) = tx.send(result).await {
+                                error!("Could not write to channel: {}", e);
                             }
                         } else {
-                            error!("no stdin");
+                            error!("Decode disabled");
                         }
                     } else {
                         error!("No child");
@@ -328,81 +359,16 @@ impl VoiceEventHandler for Receiver {
                     }
                 };
 
-                let mut child = match self.inner.ssrc_ffmpeg_hashmap.write().await.remove(&ssrc) {
-                    Some(c) => c,
+                // By removing the sender from the hash map, the `mpsc::Sender` is dropped.
+                // This causes `rx.recv().await` in the spawned task to return None,
+                // which closes `ffmpeg`'s stdin and proceeds to finish the process and run the DB updates.
+                match self.inner.ssrc_ffmpeg_hashmap.write().await.remove(&ssrc) {
+                    Some(_) => {
+                        info!("Removed sender for ssrc {}", ssrc);
+                    }
                     None => {
                         error!("No child process found for ssrc {}", ssrc);
                         return None;
-                    }
-                };
-
-                info!("wait for child");
-                // Close stdin so ffmpeg knows the stream has ended and can exit
-                drop(child.stdin.take());
-
-                // Note: waiting with output requires stderr/stdout to be properly piped
-                // otherwise this can hang or fail
-                let output = match child.wait_with_output().await {
-                    Ok(out) => out,
-                    Err(e) => {
-                        error!("Failed to wait for child process: {}", e);
-                        return None;
-                    }
-                };
-                info!("wait is over");
-
-                let stdout = String::from_utf8(output.stdout).unwrap_or_default();
-                let stderr = String::from_utf8(output.stderr).unwrap_or_default();
-
-                info!("stdout {:#?}", stdout);
-                info!("stderr {:#?}", stderr);
-
-                let lock_now = self.inner.now.read().await;
-                let now = match lock_now.get(&ssrc) {
-                    Some(t) => t,
-                    None => {
-                        error!("No start time found for ssrc {}", ssrc);
-                        return None;
-                    }
-                };
-                let time_elapsed = chrono::Utc::now()
-                    .signed_duration_since(*now)
-                    .num_milliseconds();
-
-                let lock_file: tokio::sync::RwLockReadGuard<'_, HashMap<u32, String>> =
-                    self.inner.file_name.read().await;
-                let file_name = match lock_file.get(&ssrc) {
-                    Some(f) => f,
-                    None => {
-                        error!("No file name found for ssrc {}", ssrc);
-                        return None;
-                    }
-                };
-
-                let last_person_in_channel = { self.inner.user_id_hashmap.read().await.len() == 0 };
-                // 2 = JOINED 3 = LAST
-                let state = { if last_person_in_channel { 3 } else { 2 } };
-
-                info!("File name :{}", file_name);
-
-                match sqlx::query!(
-                    "UPDATE audio_files
-						SET end_ts = audio_files.start_ts + $1, state_leave = $2
-						WHERE file_name = $3",
-                    time_elapsed,
-                    state,
-                    file_name
-                )
-                .execute(&self.inner.pool)
-                .await
-                {
-                    Ok(ok) => {
-                        info!("Updated table row");
-                        ok
-                    }
-                    Err(err) => {
-                        error!("{}", err);
-                        panic!()
                     }
                 };
             }

@@ -34,23 +34,6 @@ impl TypeMapKey for HelperStruct {
     type Value = Arc<RwLock<HashMap<u64, Option<u64>>>>;
 }
 
-pub struct MpmcChannels;
-impl TypeMapKey for MpmcChannels {
-    type Value = Arc<
-        RwLock<
-            HashMap<
-                u64,
-                (
-                    // Handler
-                    tokio::sync::broadcast::Sender<i32>,
-                    // Receiver
-                    tokio::sync::broadcast::Sender<i32>,
-                ),
-            >,
-        >,
-    >;
-}
-
 #[derive(Clone)]
 pub struct Custom {
     cache: Arc<Cache>,
@@ -149,7 +132,6 @@ async fn main() {
         // data.insert::<MysqlConnection>(mysql_pool.clone());
         data.insert::<HelperStruct>(Arc::new(RwLock::new(HashMap::new())));
         data.insert::<HasBossMusic>(HashMap::new());
-        data.insert::<MpmcChannels>(Arc::new(RwLock::new(HashMap::new())));
     }
 
     let http = client.http.clone();
