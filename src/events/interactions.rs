@@ -46,7 +46,16 @@ pub async fn handle_play_audio(
     ctx: &Context,
     file_name: &str,
 ) -> String {
-    let manager = songbird::get(ctx).await.unwrap();
+    let manager = match songbird::get(ctx).await {
+        Some(m) => m,
+        None => return "Voice system is not configured.".to_string(),
+    };
+
+    let guild_id = match application_command.guild_id {
+        Some(id) => id,
+        None => return "This command can only be used in a server.".to_string(),
+    };
+
     // TODO: This does not return and error if the wrong file path is given?
     let result = songbird::input::File::new(format!(
         "{}{}",
@@ -55,7 +64,12 @@ pub async fn handle_play_audio(
     ));
 
     let input = songbird::input::Input::from(result);
-    let handler = manager.get(application_command.guild_id.unwrap()).unwrap();
+
+    let handler = match manager.get(guild_id) {
+        Some(h) => h,
+        None => return "I am not currently in a voice channel.".to_string(),
+    };
+
     let handler_lock = handler.lock().await.enqueue(input.into()).await;
     let _ = handler_lock.set_volume(0.5);
 

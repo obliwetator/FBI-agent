@@ -169,13 +169,13 @@ impl VoiceEventHandler for Receiver {
                     return None;
                 };
 
-                let guild = self
-                    .inner
-                    .ctx_main
-                    .cache
-                    .guild(self.inner.guild_id)
-                    .unwrap()
-                    .to_owned();
+                let guild = match self.inner.ctx_main.cache.guild(self.inner.guild_id) {
+                    Some(g) => g.to_owned(),
+                    None => {
+                        error!("Guild {} not in cache", self.inner.guild_id);
+                        return None;
+                    }
+                };
 
                 let member = match guild.member(&self.inner.ctx_main, user_id.0).await {
                     Ok(m) => m,
@@ -437,7 +437,7 @@ fn spawn_ffmpeg(path: &str) -> Child {
         .stdout(std::process::Stdio::piped())
         .spawn();
 
-    command.unwrap()
+    command.expect("Failed to spawn ffmpeg process")
 }
 
 // TODO: username instead of id
