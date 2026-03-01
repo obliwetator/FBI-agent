@@ -300,7 +300,7 @@ impl VoiceEventHandler for Receiver {
                                 let _ = result.write_i16_le(n).await;
                             }
 
-                            if let Err(e) = tx.send(result).await {
+                            if let Err(e) = tx.try_send(result) {
                                 error!("Could not write to channel: {}", e);
                             }
                         } else {
