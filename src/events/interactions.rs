@@ -3,7 +3,7 @@ use serenity::{
     builder::{CreateInteractionResponse, CreateInteractionResponseMessage},
     client::Context,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::event_handler::Handler;
 
@@ -11,7 +11,9 @@ use super::voice_receiver::RECORDING_FILE_PATH;
 
 pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Interaction) {
     match interaction {
-        Interaction::Ping(_) => todo!(),
+        Interaction::Ping(_) => {
+            warn!("Unhandled interaction type: Ping");
+        }
         Interaction::Command(application_command) => {
             let content = match application_command.data.name.as_str() {
                 "help" => ":(".to_string(),
@@ -34,10 +36,27 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                 info!("Cannot respond to slash command: {}", why);
             }
         }
-        Interaction::Component(_) => todo!(),
-        Interaction::Autocomplete(_) => todo!(),
-        Interaction::Modal(_) => todo!(),
-        _ => todo!(),
+        Interaction::Component(component) => {
+            warn!(
+                "Unhandled interaction type: Component (id={})",
+                component.data.custom_id
+            );
+        }
+        Interaction::Autocomplete(autocomplete) => {
+            warn!(
+                "Unhandled interaction type: Autocomplete (name={})",
+                autocomplete.data.name
+            );
+        }
+        Interaction::Modal(modal) => {
+            warn!(
+                "Unhandled interaction type: Modal (id={})",
+                modal.data.custom_id
+            );
+        }
+        _ => {
+            warn!("Unhandled unknown interaction type");
+        }
     }
 }
 

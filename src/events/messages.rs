@@ -4,7 +4,7 @@ use serenity::{
     client::Context,
     model::channel::{Message, MessageType},
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::event_handler::Handler;
 
@@ -32,23 +32,48 @@ pub async fn message(_self: &Handler, ctx: Context, msg: Message) {
         MessageType::NitroTier2 => {}
         MessageType::NitroTier3 => {}
         MessageType::PinsAdd => {}
-        MessageType::GuildDiscoveryGracePeriodInitialWarning => todo!(),
-        MessageType::GuildDiscoveryGracePeriodFinalWarning => todo!(),
-        MessageType::ThreadCreated => todo!(),
+        MessageType::GuildDiscoveryGracePeriodInitialWarning => {
+            warn!("Unhandled message type: GuildDiscoveryGracePeriodInitialWarning");
+        }
+        MessageType::GuildDiscoveryGracePeriodFinalWarning => {
+            warn!("Unhandled message type: GuildDiscoveryGracePeriodFinalWarning");
+        }
+        MessageType::ThreadCreated => {
+            warn!("Unhandled message type: ThreadCreated");
+        }
         MessageType::ChatInputCommand => {
             // info!("slash command message: {:#?}", msg);
         }
-        MessageType::ThreadStarterMessage => todo!(),
-        MessageType::ContextMenuCommand => todo!(),
-
-        MessageType::AutoModAction => todo!(),
-        MessageType::RoleSubscriptionPurchase => todo!(),
-        MessageType::InteractionPremiumUpsell => todo!(),
-        MessageType::StageStart => todo!(),
-        MessageType::StageEnd => todo!(),
-        MessageType::StageSpeaker => todo!(),
-        MessageType::StageTopic => todo!(),
-        MessageType::GuildApplicationPremiumSubscription => todo!(),
+        MessageType::ThreadStarterMessage => {
+            warn!("Unhandled message type: ThreadStarterMessage");
+        }
+        MessageType::ContextMenuCommand => {
+            warn!("Unhandled message type: ContextMenuCommand");
+        }
+        MessageType::AutoModAction => {
+            warn!("Unhandled message type: AutoModAction");
+        }
+        MessageType::RoleSubscriptionPurchase => {
+            warn!("Unhandled message type: RoleSubscriptionPurchase");
+        }
+        MessageType::InteractionPremiumUpsell => {
+            warn!("Unhandled message type: InteractionPremiumUpsell");
+        }
+        MessageType::StageStart => {
+            warn!("Unhandled message type: StageStart");
+        }
+        MessageType::StageEnd => {
+            warn!("Unhandled message type: StageEnd");
+        }
+        MessageType::StageSpeaker => {
+            warn!("Unhandled message type: StageSpeaker");
+        }
+        MessageType::StageTopic => {
+            warn!("Unhandled message type: StageTopic");
+        }
+        MessageType::GuildApplicationPremiumSubscription => {
+            warn!("Unhandled message type: GuildApplicationPremiumSubscription");
+        }
         MessageType::Unknown(_) => {
             info!("unkown type");
         }
@@ -65,7 +90,11 @@ pub async fn message_delete(
     _deleted_message_id: serenity::model::id::MessageId,
     _guild_id: Option<serenity::model::id::GuildId>,
 ) {
-    todo!()
+    // Not yet implemented — log and return instead of panicking
+    warn!(
+        "message_delete not implemented: channel={:?} message={:?} guild={:?}",
+        _channel_id, _deleted_message_id, _guild_id
+    );
 }
 
 pub async fn message_delete_bulk(
@@ -75,7 +104,13 @@ pub async fn message_delete_bulk(
     _multiple_deleted_messages_ids: Vec<serenity::model::id::MessageId>,
     _guild_id: Option<serenity::model::id::GuildId>,
 ) {
-    todo!()
+    // Not yet implemented — log and return instead of panicking
+    warn!(
+        "message_delete_bulk not implemented: channel={:?} count={} guild={:?}",
+        _channel_id,
+        _multiple_deleted_messages_ids.len(),
+        _guild_id
+    );
 }
 
 pub async fn message_update(
@@ -85,5 +120,6 @@ pub async fn message_update(
     _new: Option<Message>,
     _event: serenity::model::event::MessageUpdateEvent,
 ) {
-    todo!()
+    // Not yet implemented — log and return instead of panicking
+    warn!("message_update not implemented: event={:?}", _event.id);
 }

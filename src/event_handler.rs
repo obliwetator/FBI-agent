@@ -9,10 +9,10 @@ use serenity::{
         gateway::Ready,
         guild::Guild,
         prelude::{
-            automod::{ActionExecution, Rule},
             GuildChannel, GuildId, GuildScheduledEventUserAddEvent,
             GuildScheduledEventUserRemoveEvent, ScheduledEvent, StageInstance, StickerId,
             ThreadListSyncEvent, ThreadMember, ThreadMembersUpdateEvent,
+            automod::{ActionExecution, Rule},
         },
         sticker::Sticker,
     },
@@ -61,13 +61,16 @@ impl EventHandler for Handler {
         let lock = get_lock_read(&ctx).await;
 
         {
+            // Acquire the write lock once for the entire loop instead of once per
+            // iteration.  Repeatedly dropping and re-acquiring the write lock lets
+            // readers (e.g. get_channel_with_most_members) slip in between iterations
+            // and causes unnecessary contention.
+            let mut guard = lock.write().await;
             for ele in guild_cached {
                 if let Some(channel_id) = &ele.afk_metadata {
-                    lock.write()
-                        .await
-                        .insert(ele.id.get(), Some(channel_id.afk_channel_id.get()));
+                    guard.insert(ele.id.get(), Some(channel_id.afk_channel_id.get()));
                 } else {
-                    lock.write().await.insert(ele.id.get(), None);
+                    guard.insert(ele.id.get(), None);
                 }
             }
         }
