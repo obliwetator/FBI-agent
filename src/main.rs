@@ -108,8 +108,11 @@ async fn main() {
 
     // let a = conn.exec_map("SELECT * FROM guilds WHERE id IN (:id)", db_param, | id | DBGuild { id });
     // Configure the client with your Discord bot token in the environment.
-    let token = config::TOKEN;
-    let application_id = config::APPLICATION_ID;
+    #[cfg(debug_assertions)]
+    let (token, application_id) = (config::TOKEN_DEBUG, config::APPLICATION_ID_DEBUG);
+
+    #[cfg(not(debug_assertions))]
+    let (token, application_id) = (config::TOKEN_RELEASE, config::APPLICATION_ID_RELEASE);
 
     // Here, we need to configure Songbird to decode all incoming voice packets.
     // If you want, you can do this on a per-call basis---here, we need it to
