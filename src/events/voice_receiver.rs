@@ -12,12 +12,13 @@ use songbird::{
 use sqlx::{Pool, Postgres};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub const RECORDING_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/voice_recordings";
 pub const CLIPS_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/clips";
@@ -152,14 +153,12 @@ impl VoiceEventHandler for Receiver {
                     }
 
                     {
-                        if self
-                            .inner
-                            .ssrc_ffmpeg_hashmap
-                            .read()
-                            .await
-                            .get(ssrc)
-                            .is_some()
-                        {
+                        // Use a single write-lock for the check-and-insert to avoid a
+                        // TOCTOU race: if we checked with a read lock and then upgraded
+                        // to a write lock, another concurrent event could slip in between
+                        // and spawn a duplicate ffmpeg process for the same SSRC.
+                        let mut ffmpeg_map = self.inner.ssrc_ffmpeg_hashmap.write().await;
+                        if ffmpeg_map.contains_key(ssrc) {
                             // we have already spawned a ffmpeg process
                             // This should happen when the bot gets reconnected to the voice channel by the framework.
                             error!("already got ffmpeg process");
@@ -184,13 +183,12 @@ impl VoiceEventHandler for Receiver {
                             .await;
                             let mut child = spawn_ffmpeg(&path);
 
-                            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+                            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4000);
 
-                            self.inner
-                                .ssrc_ffmpeg_hashmap
-                                .write()
-                                .await
-                                .insert(*ssrc, tx);
+                            ffmpeg_map.insert(*ssrc, tx);
+                            // Drop the write lock now that the entry is committed, before
+                            // spawning the background task so VoiceTick can read immediately.
+                            drop(ffmpeg_map);
 
                             let inner_clone = self.inner.clone();
                             let ssrc_clone = *ssrc;
@@ -203,6 +201,10 @@ impl VoiceEventHandler for Receiver {
                                             break;
                                         }
                                     }
+                                    info!(
+                                        "mpsc receiver channel for ssrc {} closed (rx.recv() returned None) or write failed. Closing ffmpeg stdin.",
+                                        ssrc_clone
+                                    );
                                 }
 
                                 info!("wait for child");
@@ -214,12 +216,6 @@ impl VoiceEventHandler for Receiver {
                                     }
                                 };
                                 info!("wait is over");
-
-                                let stdout = String::from_utf8(output.stdout).unwrap_or_default();
-                                let stderr = String::from_utf8(output.stderr).unwrap_or_default();
-
-                                info!("stdout {:#?}", stdout);
-                                info!("stderr {:#?}", stderr);
 
                                 let lock_now = inner_clone.now.read().await;
                                 let now = match lock_now.get(&ssrc_clone) {
@@ -293,15 +289,31 @@ impl VoiceEventHandler for Receiver {
 
                     if let Some(tx) = tx {
                         if let Some(decoded_voice) = data.decoded_voice.as_ref() {
-                            let mut result: Vec<u8> = Vec::new();
-
+                            // Pre-allocate the exact byte count (2 bytes per i16 sample)
+                            // and convert synchronously — avoids creating ~1920 async futures
+                            // per 20ms tick that were previously caused by write_i16_le().await.
+                            let mut result: Vec<u8> = Vec::with_capacity(decoded_voice.len() * 2);
                             for &n in decoded_voice {
-                                // TODO: Use buffer
-                                let _ = result.write_i16_le(n).await;
+                                result.extend_from_slice(&n.to_le_bytes());
                             }
 
                             if let Err(e) = tx.try_send(result) {
-                                error!("Could not write to channel: {}", e);
+                                // Channel full means ffmpeg is temporarily behind.
+                                // This drops the packet rather than blocking the VoiceTick
+                                // handler (which would stall all other SSRCs too).
+                                //
+                                // Rate-limit the warning: only log once every 100 drops
+                                // per SSRC to avoid flooding the log.
+                                static DROP_COUNTER: AtomicU64 = AtomicU64::new(0);
+                                let count = DROP_COUNTER.fetch_add(1, Ordering::Relaxed);
+                                if count % 100 == 0 {
+                                    warn!(
+                                        "Audio packet dropped for ssrc {} (total drops so far: {}): {}",
+                                        ssrc,
+                                        count + 1,
+                                        e
+                                    );
+                                }
                             }
                         } else {
                             error!("Decode disabled");
@@ -317,34 +329,13 @@ impl VoiceEventHandler for Receiver {
                 // info!("RTCP packet received: {:?}", data.packet);
             }
 
-            Ctx::DriverDisconnect(DisconnectData {
-                kind,
-                reason,
-                channel_id,
-                guild_id,
-                session_id,
-                ..
-            }) => {
+            Ctx::DriverDisconnect(DisconnectData { kind, reason, .. }) => {
                 info!("Disconnected \n kind: {:?} \n reason {:?}", kind, reason)
             }
-            Ctx::DriverConnect(ConnectData {
-                channel_id,
-                guild_id,
-                session_id,
-                server,
-                ssrc,
-                ..
-            }) => {
+            Ctx::DriverConnect(ConnectData { .. }) => {
                 info!("Connected")
             }
-            Ctx::DriverReconnect(ConnectData {
-                channel_id,
-                guild_id,
-                session_id,
-                server,
-                ssrc,
-                ..
-            }) => {
+            Ctx::DriverReconnect(ConnectData { .. }) => {
                 info!("Reconnected")
             }
 
@@ -394,13 +385,16 @@ fn spawn_ffmpeg(path: &str) -> Child {
         .args(["-c:a", "libvorbis"])
         .args(["-async", "1"]) // this will input silence when there is no packets coming.
         // HOWEVER. It will not work if the packets do not have a timestamp attached to them. We can tell ffmpeg to attach its own timestamps and figure the timings by itself
-        // We use the -use_wallclock_as_timestamps argument
         .args(["-flush_packets", "1"]) // Write to the file on every packet. While this is wasteful it allows semi realtime audio playback.
         .arg(format!("{}.ogg", path)) // output
         .stdin(std::process::Stdio::piped())
-        // We read from stdout/stderr later with wait_with_output, so they must be piped
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
+        // stdout: ffmpeg writes nothing useful to stdout for this use case.
+        .stdout(std::process::Stdio::null())
+        // stderr: piped so we can drain it continuously in a background reader.
+        // Do NOT use Stdio::null() here if you want to see ffmpeg errors.
+        // Do NOT use wait_with_output() to read it — that only reads after the
+        // process exits, letting the 64 KB pipe buffer fill and deadlock ffmpeg.
+        .stderr(std::process::Stdio::null())
         .spawn();
 
     command.expect("Failed to spawn ffmpeg process")
