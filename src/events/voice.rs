@@ -18,6 +18,60 @@ pub async fn voice_server_update(
 ) {
 }
 
+fn log_voice_state_changes(
+    old: &serenity::model::prelude::VoiceState,
+    new_state: &serenity::model::prelude::VoiceState,
+) {
+    if old.deaf != new_state.deaf {
+        info!(
+            "User server deafened changed: {} -> {}",
+            old.deaf, new_state.deaf
+        );
+    }
+    if old.mute != new_state.mute {
+        info!(
+            "User server muted changed: {} -> {}",
+            old.mute, new_state.mute
+        );
+    }
+    if old.self_deaf != new_state.self_deaf {
+        info!(
+            "User self deafened changed: {} -> {}",
+            old.self_deaf, new_state.self_deaf
+        );
+    }
+    if old.self_mute != new_state.self_mute {
+        info!(
+            "User self muted changed: {} -> {}",
+            old.self_mute, new_state.self_mute
+        );
+    }
+    if old.self_stream != new_state.self_stream {
+        info!(
+            "User stream status changed: {:?} -> {:?}",
+            old.self_stream, new_state.self_stream
+        );
+    }
+    if old.self_video != new_state.self_video {
+        info!(
+            "User video status changed: {} -> {}",
+            old.self_video, new_state.self_video
+        );
+    }
+    if old.suppress != new_state.suppress {
+        info!(
+            "User suppress status changed: {} -> {}",
+            old.suppress, new_state.suppress
+        );
+    }
+    if old.request_to_speak_timestamp != new_state.request_to_speak_timestamp {
+        info!(
+            "User request to speak changed: {:?} -> {:?}",
+            old.request_to_speak_timestamp, new_state.request_to_speak_timestamp
+        );
+    }
+}
+
 pub async fn voice_state_update(
     _self: &Handler,
     ctx: Context,
@@ -52,8 +106,7 @@ pub async fn voice_state_update(
                     // We don't care about any events at the moment
                     if new_channel_id == old_channel_id {
                         // An action happened that was NOT switching channels.
-                        // We don't care about those
-                        info!("An action happened that was NOT switching channels");
+                        log_voice_state_changes(&old, &new_state);
                         return;
                     } else {
                         // user switched channels
@@ -168,16 +221,29 @@ async fn get_channel_with_most_members(
         None => return None,
     };
 
-    let lock_guard = lock.read().await;
-    let afk_channel_id_option = lock_guard.get(&guild_id.get()).copied().unwrap_or(None);
-    let all_channels = &ctx
+    // Extract only the single value we need, then drop the read guard immediately.
+    // Holding the guard across the channel-iteration loop (which calls into the cache)
+    // would block any concurrent writer (e.g. cache_ready) for the entire duration.
+    let afk_channel_id_option: Option<u64> = {
+        let lock_guard = lock.read().await;
+        lock_guard.get(&guild_id.get()).copied().unwrap_or(None)
+    };
+
+    // Clone the channels out of the cache so we don't hold a DashMap guard
+    // while doing further cache lookups inside the loop (guild_channel.members).
+    let channels: Vec<_> = ctx
         .cache
         .guild(guild_id)
         .expect("cannot clone guild from cache")
-        .channels;
+        .channels
+        .values()
+        .cloned()
+        .collect();
+
     let mut highest_channel_id: ChannelId = ChannelId::new(1);
     let mut highest_channel_len: usize = 0;
-    for (channel_id, guild_channel) in all_channels {
+    for guild_channel in &channels {
+        let channel_id = guild_channel.id;
         if let Some(afk_channel_id) = afk_channel_id_option {
             // Ignore channels that are meant for afk
             if afk_channel_id == channel_id.get() {
