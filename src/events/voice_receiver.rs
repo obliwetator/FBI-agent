@@ -464,7 +464,7 @@ async fn create_path(
     let null: Option<i64> = None;
 
     match sqlx::query!(
-        "INSERT INTO audio_files
+        "INSERT INTO audio_files 
 	(file_name, guild_id, channel_id, user_id, year, month, start_ts, end_ts, state_enter) VALUES
 	($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         file_name,
