@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::AsyncWriteExt,
     process::{Child, Command},
 };
 use tracing::{error, info, warn};
@@ -464,8 +464,8 @@ async fn create_path(
     let null: Option<i64> = None;
 
     match sqlx::query!(
-        "INSERT INTO audio_files 
-	(file_name, guild_id, channel_id, user_id, year, month, start_ts, end_ts, state_enter) VALUES 
+        "INSERT INTO audio_files
+	(file_name, guild_id, channel_id, user_id, year, month, start_ts, end_ts, state_enter) VALUES
 	($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         file_name,
         guild_id.get() as i64,
