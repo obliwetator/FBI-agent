@@ -439,6 +439,15 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, _ctx: Context, _interaction: serenity::all::Interaction) {
+        {
+            let data_read = _ctx.data.read().await;
+            if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
+                metrics
+                    .commands_executed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = metrics.update_tx.send(());
+            }
+        }
         events::interactions::interaction_create(self, _ctx, _interaction).await;
     }
 

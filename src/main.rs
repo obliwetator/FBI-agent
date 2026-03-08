@@ -13,6 +13,37 @@ use crate::{
     event_handler::Handler,
     grpc::{MyJammer, hello_world::jammer_server::JammerServer},
 };
+use std::sync::atomic::AtomicU32;
+use std::time::Instant;
+
+pub struct BotMetrics {
+    pub start_time: Instant,
+    pub commands_executed: AtomicU32,
+    pub active_voice_connections: AtomicU32,
+    pub update_tx: tokio::sync::watch::Sender<()>,
+    pub voice_update_tx: tokio::sync::watch::Sender<()>,
+    pub channel_start_times: dashmap::DashMap<u64, i64>,
+}
+
+impl Default for BotMetrics {
+    fn default() -> Self {
+        let (tx, _) = tokio::sync::watch::channel(());
+        let (voice_tx, _) = tokio::sync::watch::channel(());
+        Self {
+            start_time: Instant::now(),
+            commands_executed: AtomicU32::new(0),
+            active_voice_connections: AtomicU32::new(0),
+            update_tx: tx,
+            voice_update_tx: voice_tx,
+            channel_start_times: dashmap::DashMap::new(),
+        }
+    }
+}
+
+pub struct BotMetricsKey;
+impl TypeMapKey for BotMetricsKey {
+    type Value = Arc<BotMetrics>;
+}
 
 // use crate::http::hello;
 
@@ -135,6 +166,7 @@ async fn main() {
         // data.insert::<MysqlConnection>(mysql_pool.clone());
         data.insert::<HelperStruct>(Arc::new(RwLock::new(HashMap::new())));
         data.insert::<HasBossMusic>(HashMap::new());
+        data.insert::<BotMetricsKey>(Arc::new(BotMetrics::default()));
     }
 
     let http = client.http.clone();
@@ -154,12 +186,13 @@ async fn main() {
     let three = tokio::spawn(async move {
         let addr = "[::1]:50052".parse().unwrap();
 
-        let jammer = MyJammer::new(custom);
+        let jammer = MyJammer::new(custom.clone());
 
         info!("GreeterServer listening on {}", addr);
 
         Server::builder()
-            .add_service(JammerServer::new(jammer))
+            .add_service(JammerServer::new(jammer.clone()))
+            .add_service(crate::grpc::hello_world::dashboard_server::DashboardServer::new(jammer))
             .serve(addr)
             .await
     });

@@ -78,6 +78,40 @@ pub async fn voice_state_update(
     old_state: Option<serenity::model::prelude::VoiceState>,
     new_state: serenity::model::prelude::VoiceState,
 ) {
+    // Notify the dashboard stream of any user voice state changes
+    {
+        let data_read = ctx.data.read().await;
+        if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
+            let _ = metrics.voice_update_tx.send(());
+
+            // Track channel start times
+            if let Some(guild_id) = new_state.guild_id {
+                let mut current_channels = std::collections::HashSet::new();
+                if let Some(guild) = ctx.cache.guild(guild_id) {
+                    for (_, vs) in &guild.voice_states {
+                        if let Some(ch_id) = vs.channel_id {
+                            current_channels.insert(ch_id.get());
+                        }
+                    }
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                for ch in &current_channels {
+                    metrics.channel_start_times.entry(*ch).or_insert(now);
+                }
+                if let Some(old) = &old_state {
+                    if let Some(old_ch) = old.channel_id {
+                        if !current_channels.contains(&old_ch.get()) {
+                            metrics.channel_start_times.remove(&old_ch.get());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(member) = &new_state.member {
         let guild_id = match new_state.guild_id {
             Some(ok) => ok,
@@ -278,7 +312,16 @@ async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
         .expect("Songbird Voice client placed in at initialisation.")
         .clone();
 
-    let _ = manager.remove(guild_id).await;
+    let existed = manager.get(guild_id).is_some();
+    if manager.remove(guild_id).await.is_ok() && existed {
+        let data_read = ctx.data.read().await;
+        if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
+            metrics
+                .active_voice_connections
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = metrics.update_tx.send(());
+        }
+    }
 
     info!("Left the voice channel");
 }
@@ -340,6 +383,16 @@ async fn join_ch(
                 // switching channels. Don't re-register. Cleanup
                 info!("Clean up switching chanels");
             } else {
+                {
+                    let data_read = ctx.data.read().await;
+                    if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
+                        metrics
+                            .active_voice_connections
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let _ = metrics.update_tx.send(());
+                    }
+                }
+
                 let mut handler = handler_lock.lock().await;
 
                 let ctx1 = Arc::new(ctx.clone());
