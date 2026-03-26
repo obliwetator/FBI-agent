@@ -50,6 +50,15 @@ impl Dashboard for MyJammer {
         let (tx, rx) = mpsc::channel(4);
         let data_cache = self.data_cache.clone();
 
+        // Grab the metrics Arc once before spawning so we can track stream lifetime.
+        let stream_metrics = {
+            let data_guard = data_cache.data.read().await;
+            data_guard.get::<BotMetricsKey>().cloned()
+        };
+        if let Some(m) = &stream_metrics {
+            m.grpc_active_streams.fetch_add(1, Ordering::Relaxed);
+        }
+
         tokio::spawn(async move {
             loop {
                 let data_guard = data_cache.data.read().await;
@@ -69,6 +78,7 @@ impl Dashboard for MyJammer {
                 let mut voice_state_updates_received = 0i64;
                 let mut db_query_errors = 0;
                 let mut db_insert_failures = 0;
+                let mut grpc_active_streams = 0;
 
                 if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                     commands_executed = metrics.commands_executed.load(Ordering::Relaxed) as i32;
@@ -85,6 +95,7 @@ impl Dashboard for MyJammer {
                     voice_state_updates_received = metrics.voice_state_updates_received.load(Ordering::Relaxed) as i64;
                     db_query_errors = metrics.db_query_errors.load(Ordering::Relaxed) as i32;
                     db_insert_failures = metrics.db_insert_failures.load(Ordering::Relaxed) as i32;
+                    grpc_active_streams = metrics.grpc_active_streams.load(Ordering::Relaxed) as i32;
                 }
 
                 if let Some(_songbird) = data_guard.get::<SongbirdKey>() {
@@ -108,6 +119,7 @@ impl Dashboard for MyJammer {
                     voice_state_updates_received,
                     db_query_errors,
                     db_insert_failures,
+                    grpc_active_streams,
                 };
 
                 if tx.send(Ok(response)).await.is_err() {
@@ -115,6 +127,9 @@ impl Dashboard for MyJammer {
                 }
 
                 tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            if let Some(m) = &stream_metrics {
+                m.grpc_active_streams.fetch_sub(1, Ordering::Relaxed);
             }
         });
 
@@ -147,6 +162,14 @@ impl Dashboard for MyJammer {
         });
 
         let tx_clone = tx.clone();
+        let dashboard_stream_metrics = {
+            let data_guard = data_cache.data.read().await;
+            data_guard.get::<BotMetricsKey>().cloned()
+        };
+        if let Some(m) = &dashboard_stream_metrics {
+            m.grpc_active_streams.fetch_add(1, Ordering::Relaxed);
+        }
+
         tokio::spawn(async move {
             let (mut global_rx, mut voice_rx) = {
                 let data_guard = data_cache.data.read().await;
@@ -205,6 +228,7 @@ impl Dashboard for MyJammer {
                     let mut voice_state_updates_ds = 0i64;
                     let mut db_query_errors_ds = 0i32;
                     let mut db_insert_failures_ds = 0i32;
+                    let mut grpc_active_streams_ds = 0i32;
 
                     if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                         commands_executed =
@@ -222,6 +246,7 @@ impl Dashboard for MyJammer {
                         voice_state_updates_ds = metrics.voice_state_updates_received.load(Ordering::Relaxed) as i64;
                         db_query_errors_ds = metrics.db_query_errors.load(Ordering::Relaxed) as i32;
                         db_insert_failures_ds = metrics.db_insert_failures.load(Ordering::Relaxed) as i32;
+                        grpc_active_streams_ds = metrics.grpc_active_streams.load(Ordering::Relaxed) as i32;
                     }
 
                     let mut guilds = Vec::new();
@@ -256,6 +281,7 @@ impl Dashboard for MyJammer {
                         "voice_state_updates_received": voice_state_updates_ds,
                         "db_query_errors": db_query_errors_ds,
                         "db_insert_failures": db_insert_failures_ds,
+                        "grpc_active_streams": grpc_active_streams_ds,
                     });
 
                     let event = hello_world::DashboardEvent {
@@ -337,6 +363,9 @@ impl Dashboard for MyJammer {
                         }
                     }
                 }
+            }
+            if let Some(m) = &dashboard_stream_metrics {
+                m.grpc_active_streams.fetch_sub(1, Ordering::Relaxed);
             }
         });
 

@@ -59,6 +59,8 @@ pub struct BotMetrics {
     // Database health
     pub db_query_errors: AtomicU32,
     pub db_insert_failures: AtomicU32,
+    // gRPC server health
+    pub grpc_active_streams: AtomicU32,
 }
 
 impl BotMetrics {
@@ -93,6 +95,7 @@ impl Default for BotMetrics {
             voice_state_updates_received: AtomicU64::new(0),
             db_query_errors: AtomicU32::new(0),
             db_insert_failures: AtomicU32::new(0),
+            grpc_active_streams: AtomicU32::new(0),
         }
     }
 }
