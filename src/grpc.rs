@@ -209,12 +209,12 @@ impl Dashboard for MyJammer {
                     if let Some(guild_id_str) = topic.strip_prefix("guild_voice:") {
                         if let Ok(guild_id) = guild_id_str.parse::<u64>() {
                             let mut voice_states_json = Vec::new();
-                            let mut channel_start_times_json = serde_json::Map::new();
+                            let mut user_start_times_json = serde_json::Map::new();
 
                             let data_guard = data_cache.data.read().await;
-                            let channel_start_times: Option<dashmap::DashMap<u64, i64>> =
+                            let user_start_times: Option<dashmap::DashMap<u64, i64>> =
                                 if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
-                                    Some(metrics.channel_start_times.clone())
+                                    Some(metrics.user_start_times.clone())
                                 } else {
                                     None
                                 };
@@ -235,10 +235,10 @@ impl Dashboard for MyJammer {
                                             "suppress": voice_state.suppress,
                                         }));
 
-                                        if let Some(times) = &channel_start_times {
-                                            if let Some(time) = times.get(&channel_id.get()) {
-                                                channel_start_times_json.insert(
-                                                    channel_id.get().to_string(),
+                                        if let Some(times) = &user_start_times {
+                                            if let Some(time) = times.get(&user_id.get()) {
+                                                user_start_times_json.insert(
+                                                    user_id.get().to_string(),
                                                     serde_json::Value::Number((*time).into()),
                                                 );
                                             }
@@ -251,7 +251,7 @@ impl Dashboard for MyJammer {
                                 event_type: "GUILD_VOICE_UPDATE".to_string(),
                                 json_payload: serde_json::json!({
                                     "voice_states": voice_states_json,
-                                    "channel_start_times": channel_start_times_json
+                                    "user_start_times": user_start_times_json
                                 })
                                 .to_string(),
                             };

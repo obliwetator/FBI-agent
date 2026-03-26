@@ -84,30 +84,26 @@ pub async fn voice_state_update(
         if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
             let _ = metrics.voice_update_tx.send(());
 
-            // Track channel start times
-            if let Some(guild_id) = new_state.guild_id {
-                let mut current_channels = std::collections::HashSet::new();
-                if let Some(guild) = ctx.cache.guild(guild_id) {
-                    for (_, vs) in &guild.voice_states {
-                        if let Some(ch_id) = vs.channel_id {
-                            current_channels.insert(ch_id.get());
-                        }
-                    }
-                }
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
-                for ch in &current_channels {
-                    metrics.channel_start_times.entry(*ch).or_insert(now);
-                }
+            // Track user start times
+            let user_id = new_state.user_id.get();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+
+            if let Some(new_ch) = new_state.channel_id {
                 if let Some(old) = &old_state {
-                    if let Some(old_ch) = old.channel_id {
-                        if !current_channels.contains(&old_ch.get()) {
-                            metrics.channel_start_times.remove(&old_ch.get());
-                        }
+                    if old.channel_id != Some(new_ch) {
+                        // User switched channels
+                        metrics.user_start_times.insert(user_id, now);
                     }
+                } else {
+                    // User joined a channel
+                    metrics.user_start_times.insert(user_id, now);
                 }
+            } else {
+                // User left the channel completely
+                metrics.user_start_times.remove(&user_id);
             }
         }
     }

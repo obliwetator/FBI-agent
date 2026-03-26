@@ -22,7 +22,7 @@ pub struct BotMetrics {
     pub active_voice_connections: AtomicU32,
     pub update_tx: tokio::sync::watch::Sender<()>,
     pub voice_update_tx: tokio::sync::watch::Sender<()>,
-    pub channel_start_times: dashmap::DashMap<u64, i64>,
+    pub user_start_times: dashmap::DashMap<u64, i64>,
 }
 
 impl Default for BotMetrics {
@@ -35,7 +35,7 @@ impl Default for BotMetrics {
             active_voice_connections: AtomicU32::new(0),
             update_tx: tx,
             voice_update_tx: voice_tx,
-            channel_start_times: dashmap::DashMap::new(),
+            user_start_times: dashmap::DashMap::new(),
         }
     }
 }
