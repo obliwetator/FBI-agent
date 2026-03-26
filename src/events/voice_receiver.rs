@@ -367,7 +367,8 @@ impl VoiceEventHandler for Receiver {
                 info!("Connected")
             }
             Ctx::DriverReconnect(ConnectData { .. }) => {
-                info!("Reconnected")
+                info!("Reconnected");
+                self.inner.metrics.driver_reconnects.fetch_add(1, Ordering::Relaxed);
             }
 
             Ctx::ClientDisconnect(ClientDisconnect { user_id }) => {

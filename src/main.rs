@@ -52,6 +52,10 @@ pub struct BotMetrics {
     pub audio_packets_dropped: AtomicU64,
     // Voice recording pipeline — per-guild breakdown
     pub guild_recording_metrics: dashmap::DashMap<u64, Arc<GuildRecordingMetrics>>,
+    // Discord gateway health
+    pub gateway_reconnects: AtomicU32,
+    pub driver_reconnects: AtomicU32,
+    pub voice_state_updates_received: AtomicU64,
 }
 
 impl BotMetrics {
@@ -81,6 +85,9 @@ impl Default for BotMetrics {
             audio_packets_received: AtomicU64::new(0),
             audio_packets_dropped: AtomicU64::new(0),
             guild_recording_metrics: dashmap::DashMap::new(),
+            gateway_reconnects: AtomicU32::new(0),
+            driver_reconnects: AtomicU32::new(0),
+            voice_state_updates_received: AtomicU64::new(0),
         }
     }
 }

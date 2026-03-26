@@ -390,9 +390,13 @@ impl EventHandler for Handler {
         // .unwrap();
     }
 
-    // TODO
     async fn resume(&self, _ctx: Context, _: serenity::model::event::ResumedEvent) {
         info!("Resumed");
+        let data_read = _ctx.data.read().await;
+        if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
+            metrics.gateway_reconnects.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = metrics.update_tx.send(());
+        }
     }
 
     // TODO
@@ -426,6 +430,12 @@ impl EventHandler for Handler {
         _old: Option<serenity::model::prelude::VoiceState>,
         _new: serenity::model::prelude::VoiceState,
     ) {
+        {
+            let data_read = _ctx.data.read().await;
+            if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
+                metrics.voice_state_updates_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         events::voice::voice_state_update(self, _ctx, _old, _new).await;
     }
 

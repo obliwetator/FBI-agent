@@ -64,6 +64,9 @@ impl Dashboard for MyJammer {
                 let mut ffmpeg_process_crashes = 0;
                 let mut audio_packets_received = 0i64;
                 let mut audio_packets_dropped = 0i64;
+                let mut gateway_reconnects = 0;
+                let mut driver_reconnects = 0;
+                let mut voice_state_updates_received = 0i64;
 
                 if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                     commands_executed = metrics.commands_executed.load(Ordering::Relaxed) as i32;
@@ -75,6 +78,9 @@ impl Dashboard for MyJammer {
                     ffmpeg_process_crashes = metrics.ffmpeg_process_crashes.load(Ordering::Relaxed) as i32;
                     audio_packets_received = metrics.audio_packets_received.load(Ordering::Relaxed) as i64;
                     audio_packets_dropped = metrics.audio_packets_dropped.load(Ordering::Relaxed) as i64;
+                    gateway_reconnects = metrics.gateway_reconnects.load(Ordering::Relaxed) as i32;
+                    driver_reconnects = metrics.driver_reconnects.load(Ordering::Relaxed) as i32;
+                    voice_state_updates_received = metrics.voice_state_updates_received.load(Ordering::Relaxed) as i64;
                 }
 
                 if let Some(_songbird) = data_guard.get::<SongbirdKey>() {
@@ -93,6 +99,9 @@ impl Dashboard for MyJammer {
                     ffmpeg_process_crashes,
                     audio_packets_received,
                     audio_packets_dropped,
+                    gateway_reconnects,
+                    driver_reconnects,
+                    voice_state_updates_received,
                 };
 
                 if tx.send(Ok(response)).await.is_err() {
@@ -185,6 +194,9 @@ impl Dashboard for MyJammer {
                     let mut ffmpeg_process_crashes_ds = 0i32;
                     let mut audio_packets_received_ds = 0i64;
                     let mut audio_packets_dropped_ds = 0i64;
+                    let mut gateway_reconnects_ds = 0i32;
+                    let mut driver_reconnects_ds = 0i32;
+                    let mut voice_state_updates_ds = 0i64;
 
                     if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                         commands_executed =
@@ -197,6 +209,9 @@ impl Dashboard for MyJammer {
                         ffmpeg_process_crashes_ds = metrics.ffmpeg_process_crashes.load(Ordering::Relaxed) as i32;
                         audio_packets_received_ds = metrics.audio_packets_received.load(Ordering::Relaxed) as i64;
                         audio_packets_dropped_ds = metrics.audio_packets_dropped.load(Ordering::Relaxed) as i64;
+                        gateway_reconnects_ds = metrics.gateway_reconnects.load(Ordering::Relaxed) as i32;
+                        driver_reconnects_ds = metrics.driver_reconnects.load(Ordering::Relaxed) as i32;
+                        voice_state_updates_ds = metrics.voice_state_updates_received.load(Ordering::Relaxed) as i64;
                     }
 
                     let mut guilds = Vec::new();
@@ -226,6 +241,9 @@ impl Dashboard for MyJammer {
                         "ffmpeg_process_crashes": ffmpeg_process_crashes_ds,
                         "audio_packets_received": audio_packets_received_ds,
                         "audio_packets_dropped": audio_packets_dropped_ds,
+                        "gateway_reconnects": gateway_reconnects_ds,
+                        "driver_reconnects": driver_reconnects_ds,
+                        "voice_state_updates_received": voice_state_updates_ds,
                     });
 
                     let event = hello_world::DashboardEvent {
