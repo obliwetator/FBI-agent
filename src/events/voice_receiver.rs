@@ -12,7 +12,7 @@ use songbird::{
 use sqlx::{Pool, Postgres};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
 use tokio::{
     io::AsyncWriteExt,
@@ -37,6 +37,8 @@ pub struct InnerReceiver {
     guild_id: GuildId,
     ssrc_ffmpeg_hashmap: Arc<RwLock<HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
     user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
+    metrics: Arc<crate::BotMetrics>,
+    guild_metrics: Arc<crate::GuildRecordingMetrics>,
 }
 
 #[allow(dead_code)]
@@ -65,10 +67,12 @@ impl Receiver {
         ctx: Arc<Context>,
         guild_id: GuildId,
         channel_id: ChannelId,
+        metrics: Arc<crate::BotMetrics>,
     ) -> Self {
         // You can manage state here, such as a buffer of audio packet bytes, so
         // you can later store them in intervals.
 
+        let guild_metrics = metrics.guild_metrics(guild_id.get());
         Self {
             inner: Arc::new(InnerReceiver {
                 pool,
@@ -79,8 +83,8 @@ impl Receiver {
                 ssrc_ffmpeg_hashmap: Arc::new(RwLock::new(HashMap::new())),
                 guild_id,
                 channel_id,
-                // member_struct_ssrc: Arc::new(RwLock::new(HashMap::new())),
-                // member_struct_id: Arc::new(RwLock::new(HashMap::new())),
+                metrics,
+                guild_metrics,
             }),
         }
     }
@@ -181,7 +185,19 @@ impl VoiceEventHandler for Receiver {
                                 is_channel_empty,
                             )
                             .await;
-                            let mut child = spawn_ffmpeg(&path);
+                            let mut child = match spawn_ffmpeg(&path) {
+                                Ok(c) => {
+                                    self.inner.metrics.active_recordings.fetch_add(1, Ordering::Relaxed);
+                                    self.inner.guild_metrics.active_recordings.fetch_add(1, Ordering::Relaxed);
+                                    c
+                                }
+                                Err(e) => {
+                                    error!("Failed to spawn ffmpeg for ssrc {}: {}", ssrc, e);
+                                    self.inner.metrics.ffmpeg_spawn_failures.fetch_add(1, Ordering::Relaxed);
+                                    self.inner.guild_metrics.ffmpeg_spawn_failures.fetch_add(1, Ordering::Relaxed);
+                                    return None;
+                                }
+                            };
 
                             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4000);
 
@@ -191,6 +207,7 @@ impl VoiceEventHandler for Receiver {
                             drop(ffmpeg_map);
 
                             let inner_clone = self.inner.clone();
+                            let guild_metrics_clone = self.inner.guild_metrics.clone();
                             let ssrc_clone = *ssrc;
 
                             tokio::spawn(async move {
@@ -212,10 +229,21 @@ impl VoiceEventHandler for Receiver {
                                     Ok(out) => out,
                                     Err(e) => {
                                         error!("Failed to wait for child process: {}", e);
+                                        inner_clone.metrics.active_recordings.fetch_sub(1, Ordering::Relaxed);
+                                        guild_metrics_clone.active_recordings.fetch_sub(1, Ordering::Relaxed);
                                         return;
                                     }
                                 };
                                 info!("wait is over");
+
+                                if !output.status.success() {
+                                    let code = output.status.code().unwrap_or(-1);
+                                    error!("ffmpeg exited with non-zero status {} for ssrc {}", code, ssrc_clone);
+                                    inner_clone.metrics.ffmpeg_process_crashes.fetch_add(1, Ordering::Relaxed);
+                                    guild_metrics_clone.ffmpeg_process_crashes.fetch_add(1, Ordering::Relaxed);
+                                }
+                                inner_clone.metrics.active_recordings.fetch_sub(1, Ordering::Relaxed);
+                                guild_metrics_clone.active_recordings.fetch_sub(1, Ordering::Relaxed);
 
                                 let lock_now = inner_clone.now.read().await;
                                 let now = match lock_now.get(&ssrc_clone) {
@@ -278,6 +306,9 @@ impl VoiceEventHandler for Receiver {
             }
             Ctx::VoiceTick(tick) => {
                 for (ssrc, data) in &tick.speaking {
+                    self.inner.metrics.audio_packets_received.fetch_add(1, Ordering::Relaxed);
+                    self.inner.guild_metrics.audio_packets_received.fetch_add(1, Ordering::Relaxed);
+
                     let tx = {
                         self.inner
                             .ssrc_ffmpeg_hashmap
@@ -304,8 +335,8 @@ impl VoiceEventHandler for Receiver {
                                 //
                                 // Rate-limit the warning: only log once every 100 drops
                                 // per SSRC to avoid flooding the log.
-                                static DROP_COUNTER: AtomicU64 = AtomicU64::new(0);
-                                let count = DROP_COUNTER.fetch_add(1, Ordering::Relaxed);
+                                let count = self.inner.metrics.audio_packets_dropped.fetch_add(1, Ordering::Relaxed);
+                                self.inner.guild_metrics.audio_packets_dropped.fetch_add(1, Ordering::Relaxed);
                                 if count % 100 == 0 {
                                     warn!(
                                         "Audio packet dropped for ssrc {} (total drops so far: {}): {}",
@@ -373,8 +404,8 @@ impl VoiceEventHandler for Receiver {
     }
 }
 
-fn spawn_ffmpeg(path: &str) -> Child {
-    let command = Command::new("ffmpeg")
+fn spawn_ffmpeg(path: &str) -> Result<Child, std::io::Error> {
+    Command::new("ffmpeg")
         // .arg("-re") // realtime
         .args(["-use_wallclock_as_timestamps", "true"]) // Attach timestamps to packets. Read -af aresample=async=1
         .args(["-f", "s16le"]) // input type
@@ -395,9 +426,7 @@ fn spawn_ffmpeg(path: &str) -> Child {
         // Do NOT use wait_with_output() to read it — that only reads after the
         // process exits, letting the 64 KB pipe buffer fill and deadlock ffmpeg.
         .stderr(std::process::Stdio::null())
-        .spawn();
-
-    command.expect("Failed to spawn ffmpeg process")
+        .spawn()
 }
 
 // TODO: username instead of id

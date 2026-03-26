@@ -13,8 +13,29 @@ use crate::{
     event_handler::Handler,
     grpc::{MyJammer, hello_world::jammer_server::JammerServer},
 };
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::time::Instant;
+
+/// Per-guild recording health, mirroring the global counters on BotMetrics.
+pub struct GuildRecordingMetrics {
+    pub active_recordings: AtomicU32,
+    pub ffmpeg_spawn_failures: AtomicU32,
+    pub ffmpeg_process_crashes: AtomicU32,
+    pub audio_packets_received: AtomicU64,
+    pub audio_packets_dropped: AtomicU64,
+}
+
+impl GuildRecordingMetrics {
+    fn new() -> Self {
+        Self {
+            active_recordings: AtomicU32::new(0),
+            ffmpeg_spawn_failures: AtomicU32::new(0),
+            ffmpeg_process_crashes: AtomicU32::new(0),
+            audio_packets_received: AtomicU64::new(0),
+            audio_packets_dropped: AtomicU64::new(0),
+        }
+    }
+}
 
 pub struct BotMetrics {
     pub start_time: Instant,
@@ -23,6 +44,24 @@ pub struct BotMetrics {
     pub update_tx: tokio::sync::watch::Sender<()>,
     pub voice_update_tx: tokio::sync::watch::Sender<()>,
     pub user_start_times: dashmap::DashMap<u64, i64>,
+    // Voice recording pipeline — global aggregates
+    pub active_recordings: AtomicU32,
+    pub ffmpeg_spawn_failures: AtomicU32,
+    pub ffmpeg_process_crashes: AtomicU32,
+    pub audio_packets_received: AtomicU64,
+    pub audio_packets_dropped: AtomicU64,
+    // Voice recording pipeline — per-guild breakdown
+    pub guild_recording_metrics: dashmap::DashMap<u64, Arc<GuildRecordingMetrics>>,
+}
+
+impl BotMetrics {
+    /// Returns the metrics entry for `guild_id`, creating it on first access.
+    pub fn guild_metrics(&self, guild_id: u64) -> Arc<GuildRecordingMetrics> {
+        self.guild_recording_metrics
+            .entry(guild_id)
+            .or_insert_with(|| Arc::new(GuildRecordingMetrics::new()))
+            .clone()
+    }
 }
 
 impl Default for BotMetrics {
@@ -36,6 +75,12 @@ impl Default for BotMetrics {
             update_tx: tx,
             voice_update_tx: voice_tx,
             user_start_times: dashmap::DashMap::new(),
+            active_recordings: AtomicU32::new(0),
+            ffmpeg_spawn_failures: AtomicU32::new(0),
+            ffmpeg_process_crashes: AtomicU32::new(0),
+            audio_packets_received: AtomicU64::new(0),
+            audio_packets_dropped: AtomicU64::new(0),
+            guild_recording_metrics: dashmap::DashMap::new(),
         }
     }
 }

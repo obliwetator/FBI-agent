@@ -379,20 +379,21 @@ async fn join_ch(
                 // switching channels. Don't re-register. Cleanup
                 info!("Clean up switching chanels");
             } else {
-                {
+                let metrics = {
                     let data_read = ctx.data.read().await;
-                    if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
-                        metrics
-                            .active_voice_connections
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let _ = metrics.update_tx.send(());
-                    }
-                }
+                    let m = data_read
+                        .get::<crate::BotMetricsKey>()
+                        .expect("BotMetrics not found");
+                    m.active_voice_connections
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let _ = m.update_tx.send(());
+                    m.clone()
+                };
 
                 let mut handler = handler_lock.lock().await;
 
                 let ctx1 = Arc::new(ctx.clone());
-                let receiver = Receiver::new(pool, ctx1, guild_id, channel_id).await;
+                let receiver = Receiver::new(pool, ctx1, guild_id, channel_id, metrics).await;
 
                 handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
                 handler.add_global_event(CoreEvent::VoiceTick.into(), receiver.clone());

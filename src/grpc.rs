@@ -59,11 +59,22 @@ impl Dashboard for MyJammer {
                 let mut active_voice_connections = 0;
                 let mut uptime_seconds = 0;
 
+                let mut active_recordings = 0;
+                let mut ffmpeg_spawn_failures = 0;
+                let mut ffmpeg_process_crashes = 0;
+                let mut audio_packets_received = 0i64;
+                let mut audio_packets_dropped = 0i64;
+
                 if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                     commands_executed = metrics.commands_executed.load(Ordering::Relaxed) as i32;
                     active_voice_connections =
                         metrics.active_voice_connections.load(Ordering::Relaxed) as i32;
                     uptime_seconds = metrics.start_time.elapsed().as_secs() as i64;
+                    active_recordings = metrics.active_recordings.load(Ordering::Relaxed) as i32;
+                    ffmpeg_spawn_failures = metrics.ffmpeg_spawn_failures.load(Ordering::Relaxed) as i32;
+                    ffmpeg_process_crashes = metrics.ffmpeg_process_crashes.load(Ordering::Relaxed) as i32;
+                    audio_packets_received = metrics.audio_packets_received.load(Ordering::Relaxed) as i64;
+                    audio_packets_dropped = metrics.audio_packets_dropped.load(Ordering::Relaxed) as i64;
                 }
 
                 if let Some(_songbird) = data_guard.get::<SongbirdKey>() {
@@ -77,6 +88,11 @@ impl Dashboard for MyJammer {
                     active_voice_connections,
                     uptime_seconds,
                     commands_executed,
+                    active_recordings,
+                    ffmpeg_spawn_failures,
+                    ffmpeg_process_crashes,
+                    audio_packets_received,
+                    audio_packets_dropped,
                 };
 
                 if tx.send(Ok(response)).await.is_err() {
@@ -164,6 +180,11 @@ impl Dashboard for MyJammer {
                     let mut commands_executed = 0;
                     let mut active_voice_connections = 0;
                     let mut start_time_secs = 0;
+                    let mut active_recordings_ds = 0i32;
+                    let mut ffmpeg_spawn_failures_ds = 0i32;
+                    let mut ffmpeg_process_crashes_ds = 0i32;
+                    let mut audio_packets_received_ds = 0i64;
+                    let mut audio_packets_dropped_ds = 0i64;
 
                     if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                         commands_executed =
@@ -171,6 +192,11 @@ impl Dashboard for MyJammer {
                         active_voice_connections =
                             metrics.active_voice_connections.load(Ordering::Relaxed) as i32;
                         start_time_secs = metrics.start_time.elapsed().as_secs() as i64;
+                        active_recordings_ds = metrics.active_recordings.load(Ordering::Relaxed) as i32;
+                        ffmpeg_spawn_failures_ds = metrics.ffmpeg_spawn_failures.load(Ordering::Relaxed) as i32;
+                        ffmpeg_process_crashes_ds = metrics.ffmpeg_process_crashes.load(Ordering::Relaxed) as i32;
+                        audio_packets_received_ds = metrics.audio_packets_received.load(Ordering::Relaxed) as i64;
+                        audio_packets_dropped_ds = metrics.audio_packets_dropped.load(Ordering::Relaxed) as i64;
                     }
 
                     let mut guilds = Vec::new();
@@ -194,7 +220,12 @@ impl Dashboard for MyJammer {
                         "active_voice_connections": active_voice_connections,
                         "uptime_seconds": start_time_secs,
                         "commands_executed": commands_executed,
-                        "guilds": guilds
+                        "guilds": guilds,
+                        "active_recordings": active_recordings_ds,
+                        "ffmpeg_spawn_failures": ffmpeg_spawn_failures_ds,
+                        "ffmpeg_process_crashes": ffmpeg_process_crashes_ds,
+                        "audio_packets_received": audio_packets_received_ds,
+                        "audio_packets_dropped": audio_packets_dropped_ds,
                     });
 
                     let event = hello_world::DashboardEvent {
@@ -212,11 +243,14 @@ impl Dashboard for MyJammer {
                             let mut user_start_times_json = serde_json::Map::new();
 
                             let data_guard = data_cache.data.read().await;
-                            let user_start_times: Option<dashmap::DashMap<u64, i64>> =
+                            let (user_start_times, guild_rec_metrics) =
                                 if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
-                                    Some(metrics.user_start_times.clone())
+                                    (
+                                        Some(metrics.user_start_times.clone()),
+                                        Some(metrics.guild_metrics(guild_id)),
+                                    )
                                 } else {
-                                    None
+                                    (None, None)
                                 };
                             drop(data_guard);
 
@@ -247,11 +281,22 @@ impl Dashboard for MyJammer {
                                 }
                             }
 
+                            let recording_metrics_json = guild_rec_metrics.map(|m| {
+                                serde_json::json!({
+                                    "active_recordings": m.active_recordings.load(Ordering::Relaxed),
+                                    "ffmpeg_spawn_failures": m.ffmpeg_spawn_failures.load(Ordering::Relaxed),
+                                    "ffmpeg_process_crashes": m.ffmpeg_process_crashes.load(Ordering::Relaxed),
+                                    "audio_packets_received": m.audio_packets_received.load(Ordering::Relaxed),
+                                    "audio_packets_dropped": m.audio_packets_dropped.load(Ordering::Relaxed),
+                                })
+                            });
+
                             let event = hello_world::DashboardEvent {
                                 event_type: "GUILD_VOICE_UPDATE".to_string(),
                                 json_payload: serde_json::json!({
                                     "voice_states": voice_states_json,
-                                    "user_start_times": user_start_times_json
+                                    "user_start_times": user_start_times_json,
+                                    "recording_metrics": recording_metrics_json,
                                 })
                                 .to_string(),
                             };
