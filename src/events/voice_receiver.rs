@@ -291,6 +291,7 @@ impl VoiceEventHandler for Receiver {
                                     }
                                     Err(err) => {
                                         error!("{}", err);
+                                        inner_clone.metrics.db_query_errors.fetch_add(1, Ordering::Relaxed);
                                     }
                                 };
                             });
@@ -513,6 +514,8 @@ async fn create_path(
         Ok(ok) => ok,
         Err(err) => {
             error!("{}", err);
+            _self.inner.metrics.db_insert_failures.fetch_add(1, Ordering::Relaxed);
+            _self.inner.metrics.db_query_errors.fetch_add(1, Ordering::Relaxed);
             panic!()
         }
     };

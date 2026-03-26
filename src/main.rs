@@ -56,6 +56,9 @@ pub struct BotMetrics {
     pub gateway_reconnects: AtomicU32,
     pub driver_reconnects: AtomicU32,
     pub voice_state_updates_received: AtomicU64,
+    // Database health
+    pub db_query_errors: AtomicU32,
+    pub db_insert_failures: AtomicU32,
 }
 
 impl BotMetrics {
@@ -88,6 +91,8 @@ impl Default for BotMetrics {
             gateway_reconnects: AtomicU32::new(0),
             driver_reconnects: AtomicU32::new(0),
             voice_state_updates_received: AtomicU64::new(0),
+            db_query_errors: AtomicU32::new(0),
+            db_insert_failures: AtomicU32::new(0),
         }
     }
 }

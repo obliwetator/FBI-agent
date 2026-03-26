@@ -67,6 +67,8 @@ impl Dashboard for MyJammer {
                 let mut gateway_reconnects = 0;
                 let mut driver_reconnects = 0;
                 let mut voice_state_updates_received = 0i64;
+                let mut db_query_errors = 0;
+                let mut db_insert_failures = 0;
 
                 if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                     commands_executed = metrics.commands_executed.load(Ordering::Relaxed) as i32;
@@ -81,6 +83,8 @@ impl Dashboard for MyJammer {
                     gateway_reconnects = metrics.gateway_reconnects.load(Ordering::Relaxed) as i32;
                     driver_reconnects = metrics.driver_reconnects.load(Ordering::Relaxed) as i32;
                     voice_state_updates_received = metrics.voice_state_updates_received.load(Ordering::Relaxed) as i64;
+                    db_query_errors = metrics.db_query_errors.load(Ordering::Relaxed) as i32;
+                    db_insert_failures = metrics.db_insert_failures.load(Ordering::Relaxed) as i32;
                 }
 
                 if let Some(_songbird) = data_guard.get::<SongbirdKey>() {
@@ -102,6 +106,8 @@ impl Dashboard for MyJammer {
                     gateway_reconnects,
                     driver_reconnects,
                     voice_state_updates_received,
+                    db_query_errors,
+                    db_insert_failures,
                 };
 
                 if tx.send(Ok(response)).await.is_err() {
@@ -197,6 +203,8 @@ impl Dashboard for MyJammer {
                     let mut gateway_reconnects_ds = 0i32;
                     let mut driver_reconnects_ds = 0i32;
                     let mut voice_state_updates_ds = 0i64;
+                    let mut db_query_errors_ds = 0i32;
+                    let mut db_insert_failures_ds = 0i32;
 
                     if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                         commands_executed =
@@ -212,6 +220,8 @@ impl Dashboard for MyJammer {
                         gateway_reconnects_ds = metrics.gateway_reconnects.load(Ordering::Relaxed) as i32;
                         driver_reconnects_ds = metrics.driver_reconnects.load(Ordering::Relaxed) as i32;
                         voice_state_updates_ds = metrics.voice_state_updates_received.load(Ordering::Relaxed) as i64;
+                        db_query_errors_ds = metrics.db_query_errors.load(Ordering::Relaxed) as i32;
+                        db_insert_failures_ds = metrics.db_insert_failures.load(Ordering::Relaxed) as i32;
                     }
 
                     let mut guilds = Vec::new();
@@ -244,6 +254,8 @@ impl Dashboard for MyJammer {
                         "gateway_reconnects": gateway_reconnects_ds,
                         "driver_reconnects": driver_reconnects_ds,
                         "voice_state_updates_received": voice_state_updates_ds,
+                        "db_query_errors": db_query_errors_ds,
+                        "db_insert_failures": db_insert_failures_ds,
                     });
 
                     let event = hello_world::DashboardEvent {
