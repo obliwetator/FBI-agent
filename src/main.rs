@@ -61,6 +61,10 @@ pub struct BotMetrics {
     pub db_insert_failures: AtomicU32,
     // gRPC server health
     pub grpc_active_streams: AtomicU32,
+    // Process health (sampled every 15s)
+    pub process_rss_bytes: AtomicU64,
+    pub process_open_fds: AtomicU32,
+    pub tokio_active_tasks: AtomicU32,
 }
 
 impl BotMetrics {
@@ -96,6 +100,9 @@ impl Default for BotMetrics {
             db_query_errors: AtomicU32::new(0),
             db_insert_failures: AtomicU32::new(0),
             grpc_active_streams: AtomicU32::new(0),
+            process_rss_bytes: AtomicU64::new(0),
+            process_open_fds: AtomicU32::new(0),
+            tokio_active_tasks: AtomicU32::new(0),
         }
     }
 }
@@ -239,8 +246,49 @@ async fn main() {
         data,
     };
 
+    // Grab the metrics Arc before moving `client` into the spawn below.
+    let process_metrics = {
+        let data_read = client.data.read().await;
+        data_read.get::<BotMetricsKey>().cloned().expect("BotMetrics not inserted")
+    };
+
     let one = tokio::spawn(async move {
         client.start().await.unwrap();
+    });
+
+    // Background task: sample process health every 15 seconds.
+    tokio::spawn(async move {
+        loop {
+            // RSS from /proc/self/status (VmRSS line, value in kB)
+            if let Ok(status) = tokio::fs::read_to_string("/proc/self/status").await {
+                for line in status.lines() {
+                    if let Some(rest) = line.strip_prefix("VmRSS:") {
+                        let kb: u64 = rest.split_whitespace().next()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                        process_metrics.process_rss_bytes.store(kb * 1024, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+
+            // Open file descriptors: count entries in /proc/self/fd
+            if let Ok(mut dir) = tokio::fs::read_dir("/proc/self/fd").await {
+                let mut count: u32 = 0;
+                while dir.next_entry().await.ok().flatten().is_some() {
+                    count += 1;
+                }
+                process_metrics.process_open_fds.store(count, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            // Tokio runtime task count (requires tokio_unstable)
+            let task_count = tokio::runtime::Handle::current()
+                .metrics()
+                .active_tasks_count() as u32;
+            process_metrics.tokio_active_tasks.store(task_count, std::sync::atomic::Ordering::Relaxed);
+
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
     });
 
     let three = tokio::spawn(async move {

@@ -79,6 +79,9 @@ impl Dashboard for MyJammer {
                 let mut db_query_errors = 0;
                 let mut db_insert_failures = 0;
                 let mut grpc_active_streams = 0;
+                let mut process_rss_bytes = 0i64;
+                let mut process_open_fds = 0;
+                let mut tokio_active_tasks = 0;
 
                 if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                     commands_executed = metrics.commands_executed.load(Ordering::Relaxed) as i32;
@@ -96,6 +99,9 @@ impl Dashboard for MyJammer {
                     db_query_errors = metrics.db_query_errors.load(Ordering::Relaxed) as i32;
                     db_insert_failures = metrics.db_insert_failures.load(Ordering::Relaxed) as i32;
                     grpc_active_streams = metrics.grpc_active_streams.load(Ordering::Relaxed) as i32;
+                    process_rss_bytes = metrics.process_rss_bytes.load(Ordering::Relaxed) as i64;
+                    process_open_fds = metrics.process_open_fds.load(Ordering::Relaxed) as i32;
+                    tokio_active_tasks = metrics.tokio_active_tasks.load(Ordering::Relaxed) as i32;
                 }
 
                 if let Some(_songbird) = data_guard.get::<SongbirdKey>() {
@@ -120,6 +126,9 @@ impl Dashboard for MyJammer {
                     db_query_errors,
                     db_insert_failures,
                     grpc_active_streams,
+                    process_rss_bytes,
+                    process_open_fds,
+                    tokio_active_tasks,
                 };
 
                 if tx.send(Ok(response)).await.is_err() {
@@ -229,6 +238,9 @@ impl Dashboard for MyJammer {
                     let mut db_query_errors_ds = 0i32;
                     let mut db_insert_failures_ds = 0i32;
                     let mut grpc_active_streams_ds = 0i32;
+                    let mut process_rss_bytes_ds = 0i64;
+                    let mut process_open_fds_ds = 0i32;
+                    let mut tokio_active_tasks_ds = 0i32;
 
                     if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                         commands_executed =
@@ -247,6 +259,9 @@ impl Dashboard for MyJammer {
                         db_query_errors_ds = metrics.db_query_errors.load(Ordering::Relaxed) as i32;
                         db_insert_failures_ds = metrics.db_insert_failures.load(Ordering::Relaxed) as i32;
                         grpc_active_streams_ds = metrics.grpc_active_streams.load(Ordering::Relaxed) as i32;
+                        process_rss_bytes_ds = metrics.process_rss_bytes.load(Ordering::Relaxed) as i64;
+                        process_open_fds_ds = metrics.process_open_fds.load(Ordering::Relaxed) as i32;
+                        tokio_active_tasks_ds = metrics.tokio_active_tasks.load(Ordering::Relaxed) as i32;
                     }
 
                     let mut guilds = Vec::new();
@@ -282,6 +297,9 @@ impl Dashboard for MyJammer {
                         "db_query_errors": db_query_errors_ds,
                         "db_insert_failures": db_insert_failures_ds,
                         "grpc_active_streams": grpc_active_streams_ds,
+                        "process_rss_bytes": process_rss_bytes_ds,
+                        "process_open_fds": process_open_fds_ds,
+                        "tokio_active_tasks": tokio_active_tasks_ds,
                     });
 
                     let event = hello_world::DashboardEvent {
