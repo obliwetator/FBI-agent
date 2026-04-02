@@ -78,74 +78,6 @@ impl EventHandler for Handler {
         let _ = database::update_info(self, &ctx, &guilds).await;
         let _ = database::channels::update_guilds(self, &ctx, &guilds).await;
         let _ = database::channels::update_guild_channels(self, &ctx, &guilds).await;
-        // let all_ch: Vec<
-        //     HashMap<serenity::model::prelude::ChannelId, serenity::model::prelude::Channel>,
-        // > = guilds
-        //     .iter()
-        //     .map(|guild| {
-        //         let x = guild.to_guild_cached(&ctx).unwrap().channels;
-        //         x
-        //     })
-        //     .collect();
-
-        // const BIND_LIMIT: usize = 65535;
-        // for ch in all_ch {
-        //     for (channel_id, guild_channel) in ch {
-        //         match guild_channel {
-        //             serenity::model::prelude::Channel::Guild(guild_guild_channel) => {
-        //                 use sqlx::Execute;
-        //                 // let query =
-        //                 //     "INSERT INTO channels (channel_id, target_id, kind, allow, deny) VALUES ";
-        //                 // let values = "VALUES ()";
-        //                 if serenity::model::prelude::ChannelType::Voice == guild_guild_channel.kind
-        //                 {
-        //                     let permissions = &guild_guild_channel.permission_overwrites;
-        //                     let mut query_builder: sqlx::QueryBuilder::<Postgres> = sqlx::QueryBuilder::new("INSERT INTO channel_permissions (channel_id, target_id, kind, allow, deny) ");
-
-        //                     if permissions.len() == 0 {
-        //                         info!("PERM: {:#?} CH: {}", permissions, guild_guild_channel.id.0);
-        //                     } else {
-        //                         query_builder
-        //                             .push_values(
-        //                                 permissions.into_iter().take(BIND_LIMIT / 5),
-        //                                 |mut b, permission| {
-        //                                     let result = match permission.kind {
-        // 										serenity::model::prelude::PermissionOverwriteType::Member(user_id) => (user_id.0, "user"),
-        // 										serenity::model::prelude::PermissionOverwriteType::Role(role_id) => (role_id.0, "role"),
-        // 										_ => {
-        // 											panic!("No id in kind")
-        // 										}
-        // 									};
-        //                                     // If you wanted to bind these by-reference instead of by-value,
-        //                                     // you'd need an iterator that yields references that live as long as `query_builder`,
-        //                                     // e.g. collect it to a `Vec` first.
-        //                                     b.push_bind(guild_guild_channel.id.0 as i64)
-        //                                         .push_bind(result.0 as i64)
-        //                                         .push_bind(result.1)
-        //                                         .push_bind(permission.allow.bits() as i64)
-        //                                         .push_bind(permission.deny.bits() as i64);
-        //                                 },
-        //                             )
-        //                             .push(" ON CONFLICT (channel_id, target_id) DO UPDATE SET allow = EXCLUDED.allow, deny = EXCLUDED.deny ");
-
-        //                         // let query = query_builder.build();
-
-        //                         // let sql = query.sql();
-        //                         // info!("{sql}");
-
-        //                         // let res = query.execute(&self.database).await.unwrap();
-        //                     }
-        //                 }
-        //             }
-        //             serenity::model::prelude::Channel::Private(ok) => {}
-        //             serenity::model::prelude::Channel::Category(ok) => {}
-        //             _ => {
-        //                 error!("unknown channel type");
-        //                 unimplemented!()
-        //             }
-        //         }
-        //     }
-        // }
     }
 
     async fn channel_pins_update(
@@ -369,32 +301,24 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
 
-        let guild_id = GuildId::new(362257054829641758);
+        let guild_id = GuildId::new(850192711649722368);
         database::update_guild_present(ready.guilds, self).await;
 
-        // let commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
-        //     commands
-        //         .create_application_command(|command| {
-        //             commands::play_clip_command::register(command)
-        //         })
-        //         .create_application_command(|command| commands::clip_it::register(command))
-        // })
-        // .await
-        // .unwrap();
-
-        // serenity::model::prelude::command::Command::create_global_application_command(
-        //     &ctx.http,
-        //     |command| commands::play_clip_command::register(command),
-        // )
-        // .await
-        // .unwrap();
+        if let Err(why) = guild_id
+            .set_commands(&ctx.http, vec![crate::commands::jam::register()])
+            .await
+        {
+            info!("Cannot register slash commands: {}", why);
+        }
     }
 
     async fn resume(&self, _ctx: Context, _: serenity::model::event::ResumedEvent) {
         info!("Resumed");
         let data_read = _ctx.data.read().await;
         if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
-            metrics.gateway_reconnects.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics
+                .gateway_reconnects
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = metrics.update_tx.send(());
         }
     }
@@ -433,7 +357,9 @@ impl EventHandler for Handler {
         {
             let data_read = _ctx.data.read().await;
             if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
-                metrics.voice_state_updates_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .voice_state_updates_received
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
         events::voice::voice_state_update(self, _ctx, _old, _new).await;

@@ -15,7 +15,13 @@ pub async fn message(_self: &Handler, ctx: Context, msg: Message) {
     let now = Instant::now();
     // info!("message is {}", msg.content);
     match msg.kind {
-        MessageType::Regular => {}
+        MessageType::Regular => {
+            let data_read = ctx.data.read().await;
+            if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
+                metrics.messages_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = metrics.update_tx.send(());
+            }
+        }
         MessageType::ChannelFollowAdd => {}
         MessageType::GroupCallCreation => {}
         MessageType::GroupIconUpdate => {}

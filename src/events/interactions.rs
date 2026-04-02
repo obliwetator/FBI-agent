@@ -1,6 +1,9 @@
 use serenity::{
-    all::{CommandInteraction, Interaction},
-    builder::{CreateInteractionResponse, CreateInteractionResponseMessage},
+    all::{CommandDataOptionValue, CommandInteraction, Interaction},
+    builder::{
+        AutocompleteChoice, CreateAutocompleteResponse, CreateInteractionResponse,
+        CreateInteractionResponseMessage,
+    },
     client::Context,
 };
 use tracing::{info, warn};
@@ -18,6 +21,7 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
             let content = match application_command.data.name.as_str() {
                 "help" => ":(".to_string(),
                 "play" => handle_play_audio(&application_command, &ctx, "").await,
+                "jam" => handle_jam(&application_command, &ctx, &_self.database).await,
                 _ => format!(
                     "Unknown application_command with the name {}",
                     application_command.data.name
@@ -28,7 +32,9 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                 .create_response(
                     &ctx.http,
                     CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new().content(content),
+                        CreateInteractionResponseMessage::new()
+                            .content(content)
+                            .ephemeral(true),
                     ),
                 )
                 .await
@@ -43,10 +49,33 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
             );
         }
         Interaction::Autocomplete(autocomplete) => {
-            warn!(
-                "Unhandled interaction type: Autocomplete (name={})",
-                autocomplete.data.name
-            );
+            if autocomplete.data.name == "jam" {
+                let focused_value = autocomplete
+                    .data
+                    .autocomplete()
+                    .map(|a| a.value)
+                    .unwrap_or("");
+
+                let guild_id = autocomplete.guild_id.map(|id| id.get() as i64).unwrap_or(0);
+                let choices = get_clip_choices(focused_value, &_self.database, guild_id).await;
+
+                if let Err(why) = autocomplete
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Autocomplete(
+                            CreateAutocompleteResponse::new().set_choices(choices),
+                        ),
+                    )
+                    .await
+                {
+                    warn!("Cannot respond to autocomplete: {}", why);
+                }
+            } else {
+                warn!(
+                    "Unhandled interaction type: Autocomplete (name={})",
+                    autocomplete.data.name
+                );
+            }
         }
         Interaction::Modal(modal) => {
             warn!(
@@ -56,6 +85,70 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
         }
         _ => {
             warn!("Unhandled unknown interaction type");
+        }
+    }
+}
+
+/// Read the database and return up to 25 choices matching `query`.
+async fn get_clip_choices(
+    query: &str,
+    pool: &sqlx::Pool<sqlx::Postgres>,
+    guild_id: i64,
+) -> Vec<AutocompleteChoice> {
+    let query_wildcard = format!("%{}%", query);
+
+    let rows = sqlx::query!(
+        "SELECT name FROM clips WHERE guild_id = $1 AND name ILIKE $2 LIMIT 25",
+        guild_id,
+        query_wildcard
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut choices = Vec::new();
+    for row in rows {
+        if let Some(name) = row.name {
+            choices.push(AutocompleteChoice::new(name.clone(), name));
+        }
+    }
+
+    choices
+}
+
+async fn handle_jam(
+    application_command: &CommandInteraction,
+    ctx: &Context,
+    pool: &sqlx::Pool<sqlx::Postgres>,
+) -> String {
+    let clip_name = application_command.data.options.first().and_then(|o| {
+        if let CommandDataOptionValue::String(s) = &o.value {
+            Some(s.clone())
+        } else {
+            None
+        }
+    });
+
+    let clip_name = match clip_name {
+        Some(f) => f,
+        None => return "Please provide a clip name.".to_string(),
+    };
+
+    let manager = match songbird::get(ctx).await {
+        Some(m) => m,
+        None => return "Voice system is not configured.".to_string(),
+    };
+
+    let guild_id = match application_command.guild_id {
+        Some(id) => id,
+        None => return "This command can only be used in a server.".to_string(),
+    };
+
+    match crate::commands::jam::play_clip(pool, &manager, guild_id, &clip_name).await {
+        Ok(msg) => msg,
+        Err(e) => {
+            warn!("Failed to play clip: {}", e);
+            e
         }
     }
 }
@@ -94,15 +187,3 @@ pub async fn handle_play_audio(
 
     "jamming".to_string()
 }
-
-// pub async fn application_command_create(_ctx: Context, _application_command: ApplicationCommand) {
-//     todo!()
-// }
-
-// pub async fn application_command_update(_ctx: Context, _application_command: ApplicationCommand) {
-//     todo!()
-// }
-
-// pub async fn application_command_delete(_ctx: Context, _application_command: ApplicationCommand) {
-//     todo!()
-// }

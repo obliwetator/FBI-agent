@@ -13,12 +13,11 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use tracing::info;
 
+use crate::config::APPLICATION_ID_RELEASE;
 use crate::{BotMetricsKey, Custom};
 
 use serenity::prelude::{RwLock, TypeMap};
 use songbird::SongbirdKey;
-
-use crate::events::voice_receiver::CLIPS_FILE_PATH;
 
 use self::hello_world::jam_response::JamResponseEnum;
 use self::hello_world::{ActionResponse, Empty, GuildRequest, MetricsResponse};
@@ -82,6 +81,7 @@ impl Dashboard for MyJammer {
                 let mut process_rss_bytes = 0i64;
                 let mut process_open_fds = 0;
                 let mut tokio_active_tasks = 0;
+                let mut messages_received = 0;
 
                 if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                     commands_executed = metrics.commands_executed.load(Ordering::Relaxed) as i32;
@@ -89,19 +89,26 @@ impl Dashboard for MyJammer {
                         metrics.active_voice_connections.load(Ordering::Relaxed) as i32;
                     uptime_seconds = metrics.start_time.elapsed().as_secs() as i64;
                     active_recordings = metrics.active_recordings.load(Ordering::Relaxed) as i32;
-                    ffmpeg_spawn_failures = metrics.ffmpeg_spawn_failures.load(Ordering::Relaxed) as i32;
-                    ffmpeg_process_crashes = metrics.ffmpeg_process_crashes.load(Ordering::Relaxed) as i32;
-                    audio_packets_received = metrics.audio_packets_received.load(Ordering::Relaxed) as i64;
-                    audio_packets_dropped = metrics.audio_packets_dropped.load(Ordering::Relaxed) as i64;
+                    ffmpeg_spawn_failures =
+                        metrics.ffmpeg_spawn_failures.load(Ordering::Relaxed) as i32;
+                    ffmpeg_process_crashes =
+                        metrics.ffmpeg_process_crashes.load(Ordering::Relaxed) as i32;
+                    audio_packets_received =
+                        metrics.audio_packets_received.load(Ordering::Relaxed) as i64;
+                    audio_packets_dropped =
+                        metrics.audio_packets_dropped.load(Ordering::Relaxed) as i64;
                     gateway_reconnects = metrics.gateway_reconnects.load(Ordering::Relaxed) as i32;
                     driver_reconnects = metrics.driver_reconnects.load(Ordering::Relaxed) as i32;
-                    voice_state_updates_received = metrics.voice_state_updates_received.load(Ordering::Relaxed) as i64;
+                    voice_state_updates_received =
+                        metrics.voice_state_updates_received.load(Ordering::Relaxed) as i64;
                     db_query_errors = metrics.db_query_errors.load(Ordering::Relaxed) as i32;
                     db_insert_failures = metrics.db_insert_failures.load(Ordering::Relaxed) as i32;
-                    grpc_active_streams = metrics.grpc_active_streams.load(Ordering::Relaxed) as i32;
+                    grpc_active_streams =
+                        metrics.grpc_active_streams.load(Ordering::Relaxed) as i32;
                     process_rss_bytes = metrics.process_rss_bytes.load(Ordering::Relaxed) as i64;
                     process_open_fds = metrics.process_open_fds.load(Ordering::Relaxed) as i32;
                     tokio_active_tasks = metrics.tokio_active_tasks.load(Ordering::Relaxed) as i32;
+                    messages_received = metrics.messages_received.load(Ordering::Relaxed) as i32;
                 }
 
                 if let Some(_songbird) = data_guard.get::<SongbirdKey>() {
@@ -129,6 +136,7 @@ impl Dashboard for MyJammer {
                     process_rss_bytes,
                     process_open_fds,
                     tokio_active_tasks,
+                    messages_received,
                 };
 
                 if tx.send(Ok(response)).await.is_err() {
@@ -192,32 +200,15 @@ impl Dashboard for MyJammer {
                 }
             };
 
-            // initial push
+            // Mark initial watch values as seen so changed() only fires on actual updates.
             let _ = global_rx.borrow_and_update();
             let _ = voice_rx.borrow_and_update();
 
             loop {
-                let topic = topic_rx.borrow().clone();
-
-                // Wait for either the topic to change, or a relevant metric to update
-                tokio::select! {
-                    topic_changed = topic_rx.changed() => {
-                        if topic_changed.is_err() {
-                            break;
-                        }
-                    }
-                    global_changed = global_rx.changed(), if topic == "global" => {
-                        if global_changed.is_err() {
-                            break;
-                        }
-                    }
-                    voice_changed = voice_rx.changed(), if topic.starts_with("guild_voice:") => {
-                        if voice_changed.is_err() {
-                            break;
-                        }
-                    }
-                }
-
+                // Read topic BEFORE sending so we always push the current state on
+                // every iteration — including on startup when the topic may already be
+                // set (race between Task-1 processing the subscribe and this task
+                // starting its loop).
                 let topic = topic_rx.borrow().clone();
 
                 if topic == "global" {
@@ -241,6 +232,7 @@ impl Dashboard for MyJammer {
                     let mut process_rss_bytes_ds = 0i64;
                     let mut process_open_fds_ds = 0i32;
                     let mut tokio_active_tasks_ds = 0i32;
+                    let mut messages_received_ds = 0i32;
 
                     if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                         commands_executed =
@@ -248,20 +240,35 @@ impl Dashboard for MyJammer {
                         active_voice_connections =
                             metrics.active_voice_connections.load(Ordering::Relaxed) as i32;
                         start_time_secs = metrics.start_time.elapsed().as_secs() as i64;
-                        active_recordings_ds = metrics.active_recordings.load(Ordering::Relaxed) as i32;
-                        ffmpeg_spawn_failures_ds = metrics.ffmpeg_spawn_failures.load(Ordering::Relaxed) as i32;
-                        ffmpeg_process_crashes_ds = metrics.ffmpeg_process_crashes.load(Ordering::Relaxed) as i32;
-                        audio_packets_received_ds = metrics.audio_packets_received.load(Ordering::Relaxed) as i64;
-                        audio_packets_dropped_ds = metrics.audio_packets_dropped.load(Ordering::Relaxed) as i64;
-                        gateway_reconnects_ds = metrics.gateway_reconnects.load(Ordering::Relaxed) as i32;
-                        driver_reconnects_ds = metrics.driver_reconnects.load(Ordering::Relaxed) as i32;
-                        voice_state_updates_ds = metrics.voice_state_updates_received.load(Ordering::Relaxed) as i64;
+                        active_recordings_ds =
+                            metrics.active_recordings.load(Ordering::Relaxed) as i32;
+                        ffmpeg_spawn_failures_ds =
+                            metrics.ffmpeg_spawn_failures.load(Ordering::Relaxed) as i32;
+                        ffmpeg_process_crashes_ds =
+                            metrics.ffmpeg_process_crashes.load(Ordering::Relaxed) as i32;
+                        audio_packets_received_ds =
+                            metrics.audio_packets_received.load(Ordering::Relaxed) as i64;
+                        audio_packets_dropped_ds =
+                            metrics.audio_packets_dropped.load(Ordering::Relaxed) as i64;
+                        gateway_reconnects_ds =
+                            metrics.gateway_reconnects.load(Ordering::Relaxed) as i32;
+                        driver_reconnects_ds =
+                            metrics.driver_reconnects.load(Ordering::Relaxed) as i32;
+                        voice_state_updates_ds =
+                            metrics.voice_state_updates_received.load(Ordering::Relaxed) as i64;
                         db_query_errors_ds = metrics.db_query_errors.load(Ordering::Relaxed) as i32;
-                        db_insert_failures_ds = metrics.db_insert_failures.load(Ordering::Relaxed) as i32;
-                        grpc_active_streams_ds = metrics.grpc_active_streams.load(Ordering::Relaxed) as i32;
-                        process_rss_bytes_ds = metrics.process_rss_bytes.load(Ordering::Relaxed) as i64;
-                        process_open_fds_ds = metrics.process_open_fds.load(Ordering::Relaxed) as i32;
-                        tokio_active_tasks_ds = metrics.tokio_active_tasks.load(Ordering::Relaxed) as i32;
+                        db_insert_failures_ds =
+                            metrics.db_insert_failures.load(Ordering::Relaxed) as i32;
+                        grpc_active_streams_ds =
+                            metrics.grpc_active_streams.load(Ordering::Relaxed) as i32;
+                        process_rss_bytes_ds =
+                            metrics.process_rss_bytes.load(Ordering::Relaxed) as i64;
+                        process_open_fds_ds =
+                            metrics.process_open_fds.load(Ordering::Relaxed) as i32;
+                        tokio_active_tasks_ds =
+                            metrics.tokio_active_tasks.load(Ordering::Relaxed) as i32;
+                        messages_received_ds =
+                            metrics.messages_received.load(Ordering::Relaxed) as i32;
                     }
 
                     let mut guilds = Vec::new();
@@ -300,6 +307,7 @@ impl Dashboard for MyJammer {
                         "process_rss_bytes": process_rss_bytes_ds,
                         "process_open_fds": process_open_fds_ds,
                         "tokio_active_tasks": tokio_active_tasks_ds,
+                        "messages_received": messages_received_ds,
                     });
 
                     let event = hello_world::DashboardEvent {
@@ -381,6 +389,23 @@ impl Dashboard for MyJammer {
                         }
                     }
                 }
+
+                // Wait for the topic to change or a relevant metric update before
+                // sending the next payload.
+                tokio::select! {
+                    result = topic_rx.changed() => {
+                        if result.is_err() { break; }
+                    }
+                    result = global_rx.changed(), if topic == "global" => {
+                        if result.is_err() { break; }
+                    }
+                    result = voice_rx.changed(), if topic.starts_with("guild_voice:") => {
+                        if result.is_err() { break; }
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                        // Periodic push so the UI stays live even when no event fires.
+                    }
+                }
             }
             if let Some(m) = &dashboard_stream_metrics {
                 m.grpc_active_streams.fetch_sub(1, Ordering::Relaxed);
@@ -454,7 +479,8 @@ impl Jammer for MyJammer {
                 serenity::model::prelude::ChannelType::Voice => {
                     let res = guild_channel.members(&self.data_cache.cache).unwrap();
                     for (index, member) in res.iter().enumerate() {
-                        if member.user.id == 877617434029350972 {
+                        // Check if bot is in ANY channel. Otherwise the bot can't play stuff
+                        if member.user.id == APPLICATION_ID_RELEASE {
                             info!(
                                 "Ladies and gentlemen, We got him in c {}",
                                 guild_channel.id.get()
@@ -464,6 +490,7 @@ impl Jammer for MyJammer {
                                 data.guild_id,
                                 &data.clip_name,
                                 self.data_cache.data.clone(),
+                                self.data_cache.pool.clone(),
                             )
                             .await;
 
@@ -485,19 +512,19 @@ impl Jammer for MyJammer {
     }
 }
 
-async fn handle_play_audio_to_channel(id: i64, clip_name: &str, data: Arc<RwLock<TypeMap>>) {
+async fn handle_play_audio_to_channel(
+    id: i64,
+    clip_name: &str,
+    data: Arc<RwLock<TypeMap>>,
+    pool: sqlx::Pool<sqlx::Postgres>,
+) {
     let manager = {
         let data_guard = data.read().await;
         data_guard.get::<SongbirdKey>().cloned().unwrap()
     };
 
-    // TODO: This does not return and error if the wrong file path is given?
-    info!(" Clips to play : {}/{}.ogg", CLIPS_FILE_PATH, clip_name);
-    let result = songbird::input::File::new(format!("{}/{}.ogg", CLIPS_FILE_PATH, clip_name));
-
-    let input = songbird::input::Input::from(result);
-    let handler = manager.get(GuildId::new(id.try_into().unwrap())).unwrap();
-    let driver = &mut handler.lock().await;
-    let handler_lock = driver.enqueue_input(input);
-    let _ = handler_lock.await.set_volume(0.5);
+    let guild_id = GuildId::new(id.try_into().unwrap());
+    if let Err(e) = crate::commands::jam::play_clip(&pool, &manager, guild_id, clip_name).await {
+        tracing::error!("Failed to play clip from grpc: {}", e);
+    }
 }

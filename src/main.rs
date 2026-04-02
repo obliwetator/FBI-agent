@@ -61,6 +61,8 @@ pub struct BotMetrics {
     pub db_insert_failures: AtomicU32,
     // gRPC server health
     pub grpc_active_streams: AtomicU32,
+    // Bot activity
+    pub messages_received: AtomicU32,
     // Process health (sampled every 15s)
     pub process_rss_bytes: AtomicU64,
     pub process_open_fds: AtomicU32,
@@ -100,6 +102,7 @@ impl Default for BotMetrics {
             db_query_errors: AtomicU32::new(0),
             db_insert_failures: AtomicU32::new(0),
             grpc_active_streams: AtomicU32::new(0),
+            messages_received: AtomicU32::new(0),
             process_rss_bytes: AtomicU64::new(0),
             process_open_fds: AtomicU32::new(0),
             tokio_active_tasks: AtomicU32::new(0),
@@ -122,6 +125,9 @@ pub mod events;
 pub mod grpc;
 pub mod http;
 
+#[cfg(test)]
+mod tests;
+
 pub struct HasBossMusic;
 impl TypeMapKey for HasBossMusic {
     type Value = HashMap<u64, Option<String>>;
@@ -137,6 +143,7 @@ pub struct Custom {
     cache: Arc<Cache>,
     _http: Arc<Http>,
     data: Arc<RwLock<TypeMap>>,
+    pub pool: sqlx::Pool<sqlx::Postgres>,
 }
 
 pub async fn get_lock_read(ctx: &Context) -> Arc<RwLock<HashMap<u64, Option<u64>>>> {
@@ -189,6 +196,8 @@ async fn main() {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     // create relevant folders
+    let path = env::current_dir().unwrap();
+    info!("{}", path.display());
     if !std::path::Path::new(events::voice_receiver::RECORDING_FILE_PATH).exists() {
         match tokio::fs::create_dir_all(events::voice_receiver::RECORDING_FILE_PATH).await {
             Ok(_) => {}
@@ -215,14 +224,17 @@ async fn main() {
     // Here, we need to configure Songbird to decode all incoming voice packets.
     // If you want, you can do this on a per-call basis---here, we need it to
     // read the audio data that other people are sending us!
-    let songbird_config = Config::default().decode_mode(DecodeMode::Decode);
+    let songbird_config = Config::default()
+        .decode_mode(DecodeMode::Decode(songbird::driver::DecodeConfig::default()));
 
     let intents = GatewayIntents::all();
     // Create a new instance of the Client, logging in as a bot. This will
     // automatically prepend your bot token with "Bot ", which is a requirement
     // by Discord for bot users.
     let mut client = Client::builder(token, intents)
-        .event_handler(Handler { database: pool })
+        .event_handler(Handler {
+            database: pool.clone(),
+        })
         .intents(intents)
         .register_songbird_from_config(songbird_config)
         .application_id(ApplicationId::new(application_id))
@@ -244,12 +256,16 @@ async fn main() {
         cache,
         _http: http,
         data,
+        pool: pool.clone(),
     };
 
     // Grab the metrics Arc before moving `client` into the spawn below.
     let process_metrics = {
         let data_read = client.data.read().await;
-        data_read.get::<BotMetricsKey>().cloned().expect("BotMetrics not inserted")
+        data_read
+            .get::<BotMetricsKey>()
+            .cloned()
+            .expect("BotMetrics not inserted")
     };
 
     let one = tokio::spawn(async move {
@@ -258,40 +274,50 @@ async fn main() {
 
     // Background task: sample process health every 15 seconds.
     tokio::spawn(async move {
+        let mut sys = sysinfo::System::new();
+        let pid = sysinfo::get_current_pid().unwrap_or(sysinfo::Pid::from_u32(0));
+
         loop {
-            // RSS from /proc/self/status (VmRSS line, value in kB)
-            if let Ok(status) = tokio::fs::read_to_string("/proc/self/status").await {
-                for line in status.lines() {
-                    if let Some(rest) = line.strip_prefix("VmRSS:") {
-                        let kb: u64 = rest.split_whitespace().next()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(0);
-                        process_metrics.process_rss_bytes.store(kb * 1024, std::sync::atomic::Ordering::Relaxed);
-                        break;
-                    }
-                }
+            // Memory (RSS) from sysinfo
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing().with_memory(),
+            );
+            if let Some(process) = sys.process(pid) {
+                process_metrics
+                    .process_rss_bytes
+                    .store(process.memory(), std::sync::atomic::Ordering::Relaxed);
             }
 
-            // Open file descriptors: count entries in /proc/self/fd
+            // Open file descriptors: count entries in /proc/self/fd on linux
+            #[cfg(target_os = "linux")]
             if let Ok(mut dir) = tokio::fs::read_dir("/proc/self/fd").await {
                 let mut count: u32 = 0;
                 while dir.next_entry().await.ok().flatten().is_some() {
                     count += 1;
                 }
-                process_metrics.process_open_fds.store(count, std::sync::atomic::Ordering::Relaxed);
+                process_metrics
+                    .process_open_fds
+                    .store(count, std::sync::atomic::Ordering::Relaxed);
             }
 
             // Tokio runtime task count (requires tokio_unstable)
             let task_count = tokio::runtime::Handle::current()
                 .metrics()
-                .active_tasks_count() as u32;
-            process_metrics.tokio_active_tasks.store(task_count, std::sync::atomic::Ordering::Relaxed);
+                .num_alive_tasks() as u32;
+            process_metrics
+                .tokio_active_tasks
+                .store(task_count, std::sync::atomic::Ordering::Relaxed);
 
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         }
     });
 
     let three = tokio::spawn(async move {
+        #[cfg(debug_assertions)]
+        let addr = "[::1]:50053".parse().unwrap();
+        #[cfg(not(debug_assertions))]
         let addr = "[::1]:50052".parse().unwrap();
 
         let jammer = MyJammer::new(custom.clone());

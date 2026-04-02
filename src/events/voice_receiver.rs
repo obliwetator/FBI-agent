@@ -20,8 +20,8 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
-pub const RECORDING_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/voice_recordings";
-pub const CLIPS_FILE_PATH: &str = "/home/tulipan/projects/FBI-agent/clips";
+pub const RECORDING_FILE_PATH: &str = "./voice_recordings";
+pub const CLIPS_FILE_PATH: &str = "./clips";
 
 #[derive(Clone)]
 pub struct Receiver {
@@ -187,14 +187,26 @@ impl VoiceEventHandler for Receiver {
                             .await;
                             let mut child = match spawn_ffmpeg(&path) {
                                 Ok(c) => {
-                                    self.inner.metrics.active_recordings.fetch_add(1, Ordering::Relaxed);
-                                    self.inner.guild_metrics.active_recordings.fetch_add(1, Ordering::Relaxed);
+                                    self.inner
+                                        .metrics
+                                        .active_recordings
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    self.inner
+                                        .guild_metrics
+                                        .active_recordings
+                                        .fetch_add(1, Ordering::Relaxed);
                                     c
                                 }
                                 Err(e) => {
                                     error!("Failed to spawn ffmpeg for ssrc {}: {}", ssrc, e);
-                                    self.inner.metrics.ffmpeg_spawn_failures.fetch_add(1, Ordering::Relaxed);
-                                    self.inner.guild_metrics.ffmpeg_spawn_failures.fetch_add(1, Ordering::Relaxed);
+                                    self.inner
+                                        .metrics
+                                        .ffmpeg_spawn_failures
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    self.inner
+                                        .guild_metrics
+                                        .ffmpeg_spawn_failures
+                                        .fetch_add(1, Ordering::Relaxed);
                                     return None;
                                 }
                             };
@@ -229,8 +241,13 @@ impl VoiceEventHandler for Receiver {
                                     Ok(out) => out,
                                     Err(e) => {
                                         error!("Failed to wait for child process: {}", e);
-                                        inner_clone.metrics.active_recordings.fetch_sub(1, Ordering::Relaxed);
-                                        guild_metrics_clone.active_recordings.fetch_sub(1, Ordering::Relaxed);
+                                        inner_clone
+                                            .metrics
+                                            .active_recordings
+                                            .fetch_sub(1, Ordering::Relaxed);
+                                        guild_metrics_clone
+                                            .active_recordings
+                                            .fetch_sub(1, Ordering::Relaxed);
                                         return;
                                     }
                                 };
@@ -238,12 +255,25 @@ impl VoiceEventHandler for Receiver {
 
                                 if !output.status.success() {
                                     let code = output.status.code().unwrap_or(-1);
-                                    error!("ffmpeg exited with non-zero status {} for ssrc {}", code, ssrc_clone);
-                                    inner_clone.metrics.ffmpeg_process_crashes.fetch_add(1, Ordering::Relaxed);
-                                    guild_metrics_clone.ffmpeg_process_crashes.fetch_add(1, Ordering::Relaxed);
+                                    error!(
+                                        "ffmpeg exited with non-zero status {} for ssrc {}",
+                                        code, ssrc_clone
+                                    );
+                                    inner_clone
+                                        .metrics
+                                        .ffmpeg_process_crashes
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    guild_metrics_clone
+                                        .ffmpeg_process_crashes
+                                        .fetch_add(1, Ordering::Relaxed);
                                 }
-                                inner_clone.metrics.active_recordings.fetch_sub(1, Ordering::Relaxed);
-                                guild_metrics_clone.active_recordings.fetch_sub(1, Ordering::Relaxed);
+                                inner_clone
+                                    .metrics
+                                    .active_recordings
+                                    .fetch_sub(1, Ordering::Relaxed);
+                                guild_metrics_clone
+                                    .active_recordings
+                                    .fetch_sub(1, Ordering::Relaxed);
 
                                 let lock_now = inner_clone.now.read().await;
                                 let now = match lock_now.get(&ssrc_clone) {
@@ -291,7 +321,10 @@ impl VoiceEventHandler for Receiver {
                                     }
                                     Err(err) => {
                                         error!("{}", err);
-                                        inner_clone.metrics.db_query_errors.fetch_add(1, Ordering::Relaxed);
+                                        inner_clone
+                                            .metrics
+                                            .db_query_errors
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
                                 };
                             });
@@ -307,8 +340,14 @@ impl VoiceEventHandler for Receiver {
             }
             Ctx::VoiceTick(tick) => {
                 for (ssrc, data) in &tick.speaking {
-                    self.inner.metrics.audio_packets_received.fetch_add(1, Ordering::Relaxed);
-                    self.inner.guild_metrics.audio_packets_received.fetch_add(1, Ordering::Relaxed);
+                    self.inner
+                        .metrics
+                        .audio_packets_received
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.inner
+                        .guild_metrics
+                        .audio_packets_received
+                        .fetch_add(1, Ordering::Relaxed);
 
                     let tx = {
                         self.inner
@@ -336,8 +375,15 @@ impl VoiceEventHandler for Receiver {
                                 //
                                 // Rate-limit the warning: only log once every 100 drops
                                 // per SSRC to avoid flooding the log.
-                                let count = self.inner.metrics.audio_packets_dropped.fetch_add(1, Ordering::Relaxed);
-                                self.inner.guild_metrics.audio_packets_dropped.fetch_add(1, Ordering::Relaxed);
+                                let count = self
+                                    .inner
+                                    .metrics
+                                    .audio_packets_dropped
+                                    .fetch_add(1, Ordering::Relaxed);
+                                self.inner
+                                    .guild_metrics
+                                    .audio_packets_dropped
+                                    .fetch_add(1, Ordering::Relaxed);
                                 if count % 100 == 0 {
                                     warn!(
                                         "Audio packet dropped for ssrc {} (total drops so far: {}): {}",
@@ -369,7 +415,10 @@ impl VoiceEventHandler for Receiver {
             }
             Ctx::DriverReconnect(ConnectData { .. }) => {
                 info!("Reconnected");
-                self.inner.metrics.driver_reconnects.fetch_add(1, Ordering::Relaxed);
+                self.inner
+                    .metrics
+                    .driver_reconnects
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             Ctx::ClientDisconnect(ClientDisconnect { user_id }) => {
@@ -514,8 +563,16 @@ async fn create_path(
         Ok(ok) => ok,
         Err(err) => {
             error!("{}", err);
-            _self.inner.metrics.db_insert_failures.fetch_add(1, Ordering::Relaxed);
-            _self.inner.metrics.db_query_errors.fetch_add(1, Ordering::Relaxed);
+            _self
+                .inner
+                .metrics
+                .db_insert_failures
+                .fetch_add(1, Ordering::Relaxed);
+            _self
+                .inner
+                .metrics
+                .db_query_errors
+                .fetch_add(1, Ordering::Relaxed);
             panic!()
         }
     };
