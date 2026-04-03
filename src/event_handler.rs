@@ -301,14 +301,20 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
 
-        let guild_id = GuildId::new(850192711649722368);
         database::update_guild_present(ready.guilds, self).await;
 
-        if let Err(why) = guild_id
-            .set_commands(&ctx.http, vec![crate::commands::jam::register()])
-            .await
+        if let Err(why) = serenity::all::Command::set_global_commands(
+            &ctx.http,
+            vec![
+                crate::commands::voice_controls::register_jam(),
+                crate::commands::voice_controls::register_queue(),
+                crate::commands::voice_controls::register_skip(),
+                crate::commands::voice_controls::register_stop(),
+            ],
+        )
+        .await
         {
-            info!("Cannot register slash commands: {}", why);
+            info!("Cannot register global slash commands: {}", why);
         }
     }
 

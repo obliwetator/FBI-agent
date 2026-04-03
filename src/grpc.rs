@@ -524,7 +524,9 @@ async fn handle_play_audio_to_channel(
     };
 
     let guild_id = GuildId::new(id.try_into().unwrap());
-    if let Err(e) = crate::commands::jam::play_clip(&pool, &manager, guild_id, clip_name).await {
+    if let Err(e) =
+        crate::commands::voice_controls::play_clip(&pool, &manager, guild_id, clip_name).await
+    {
         tracing::error!("Failed to play clip from grpc: {}", e);
     }
 }

@@ -22,6 +22,9 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                 "help" => ":(".to_string(),
                 "play" => handle_play_audio(&application_command, &ctx, "").await,
                 "jam" => handle_jam(&application_command, &ctx, &_self.database).await,
+                "queue" => handle_queue(&application_command, &ctx).await,
+                "skip" => handle_skip(&application_command, &ctx).await,
+                "stop" => handle_stop(&application_command, &ctx).await,
                 _ => format!(
                     "Unknown application_command with the name {}",
                     application_command.data.name
@@ -57,7 +60,13 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                     .unwrap_or("");
 
                 let guild_id = autocomplete.guild_id.map(|id| id.get() as i64).unwrap_or(0);
+                info!(
+                    "Autocomplete request for 'jam' - guild_id: {}, focused_value: '{}'",
+                    guild_id, focused_value
+                );
+
                 let choices = get_clip_choices(focused_value, &_self.database, guild_id).await;
+                info!("Autocomplete returned {} choices", choices.len());
 
                 if let Err(why) = autocomplete
                     .create_response(
@@ -96,9 +105,13 @@ async fn get_clip_choices(
     guild_id: i64,
 ) -> Vec<AutocompleteChoice> {
     let query_wildcard = format!("%{}%", query);
+    info!(
+        "Querying clips - guild_id: {}, query: {}",
+        guild_id, query_wildcard
+    );
 
     let rows = sqlx::query!(
-        "SELECT name FROM clips WHERE guild_id = $1 AND name ILIKE $2 LIMIT 25",
+        "SELECT name, clip_id FROM clips WHERE guild_id = $1 AND name ILIKE $2 LIMIT 25",
         guild_id,
         query_wildcard
     )
@@ -108,8 +121,8 @@ async fn get_clip_choices(
 
     let mut choices = Vec::new();
     for row in rows {
-        if let Some(name) = row.name {
-            choices.push(AutocompleteChoice::new(name.clone(), name));
+        if let (Some(name), clip_id) = (row.name, row.clip_id) {
+            choices.push(AutocompleteChoice::new(name, clip_id));
         }
     }
 
@@ -121,6 +134,8 @@ async fn handle_jam(
     ctx: &Context,
     pool: &sqlx::Pool<sqlx::Postgres>,
 ) -> String {
+    info!("Handling jam command: {:?}", application_command.data);
+
     let clip_name = application_command.data.options.first().and_then(|o| {
         if let CommandDataOptionValue::String(s) = &o.value {
             Some(s.clone())
@@ -131,9 +146,48 @@ async fn handle_jam(
 
     let clip_name = match clip_name {
         Some(f) => f,
-        None => return "Please provide a clip name.".to_string(),
+        None => {
+            warn!("Jam command missing clip name");
+            return "Please provide a clip name.".to_string();
+        }
     };
 
+    info!("Extracted clip name: {}", clip_name);
+
+    let manager = match songbird::get(ctx).await {
+        Some(m) => m,
+        None => {
+            warn!("Songbird manager not found");
+            return "Voice system is not configured.".to_string();
+        }
+    };
+
+    let guild_id = match application_command.guild_id {
+        Some(id) => id,
+        None => {
+            warn!("Command not in a server");
+            return "This command can only be used in a server.".to_string();
+        }
+    };
+
+    info!(
+        "Attempting to play clip {} in guild {}",
+        clip_name, guild_id
+    );
+
+    match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, &clip_name).await {
+        Ok(msg) => {
+            info!("Successfully played clip: {}", msg);
+            msg
+        }
+        Err(e) => {
+            warn!("Failed to play clip: {}", e);
+            e
+        }
+    }
+}
+
+async fn handle_queue(application_command: &CommandInteraction, ctx: &Context) -> String {
     let manager = match songbird::get(ctx).await {
         Some(m) => m,
         None => return "Voice system is not configured.".to_string(),
@@ -144,13 +198,35 @@ async fn handle_jam(
         None => return "This command can only be used in a server.".to_string(),
     };
 
-    match crate::commands::jam::play_clip(pool, &manager, guild_id, &clip_name).await {
-        Ok(msg) => msg,
-        Err(e) => {
-            warn!("Failed to play clip: {}", e);
-            e
-        }
-    }
+    crate::commands::voice_controls::queue(&manager, guild_id).await
+}
+
+async fn handle_skip(application_command: &CommandInteraction, ctx: &Context) -> String {
+    let manager = match songbird::get(ctx).await {
+        Some(m) => m,
+        None => return "Voice system is not configured.".to_string(),
+    };
+
+    let guild_id = match application_command.guild_id {
+        Some(id) => id,
+        None => return "This command can only be used in a server.".to_string(),
+    };
+
+    crate::commands::voice_controls::skip(&manager, guild_id).await
+}
+
+async fn handle_stop(application_command: &CommandInteraction, ctx: &Context) -> String {
+    let manager = match songbird::get(ctx).await {
+        Some(m) => m,
+        None => return "Voice system is not configured.".to_string(),
+    };
+
+    let guild_id = match application_command.guild_id {
+        Some(id) => id,
+        None => return "This command can only be used in a server.".to_string(),
+    };
+
+    crate::commands::voice_controls::stop(&manager, guild_id).await
 }
 
 pub async fn handle_play_audio(
