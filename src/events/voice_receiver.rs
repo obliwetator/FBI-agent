@@ -493,7 +493,7 @@ async fn create_path(
     is_channel_empty: bool,
 ) -> String {
     let year = format!("{}", now.format("%Y"));
-    let month = format!("{}", now.format("%B"));
+    let month = format!("{}", now.month());
     let day_number = format!("{}", now.format("%d"));
     let day_name = format!("{}", now.format("%A"));
     let hour = format!("{}", now.format("%H"));
