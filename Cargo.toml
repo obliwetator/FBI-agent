@@ -19,7 +19,7 @@ serenity = { version = "0.12", default-features = false, features = [
 	"unstable_discord_api",
 ] }
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "tracing"] }
-songbird = { git = "https://github.com/serenity-rs/songbird", branch = "next", features = [
+songbird = { version = "0.6", features = [
 	"driver",
 	"builtin-queue",
 	"receive",
@@ -28,7 +28,7 @@ symphonia = { version = "0.5", features = ["ogg", "vorbis"] }
 serde_json = "1.0"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 chrono = "0.4"
 # actix-web = "4"
 # axum="0.6"
@@ -43,6 +43,10 @@ rustls = { version = "0.23", features = ["ring"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 dashmap = "6.1.0"
 sysinfo = "0.38.4"
+opentelemetry = "0.31.0"
+opentelemetry_sdk = { version = "0.31.0", features = ["metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.1", features = ["grpc-tonic", "metrics"] }
+tracing-opentelemetry = "0.32.1"
 
 
 [build-dependencies]

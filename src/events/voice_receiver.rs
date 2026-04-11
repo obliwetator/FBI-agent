@@ -12,7 +12,7 @@ use songbird::{
 use sqlx::{Pool, Postgres};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::RwLock;
 use tokio::{
     io::AsyncWriteExt,
@@ -39,6 +39,7 @@ pub struct InnerReceiver {
     user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
     metrics: Arc<crate::BotMetrics>,
     guild_metrics: Arc<crate::GuildRecordingMetrics>,
+    pub last_voice_packet_time: AtomicI64,
 }
 
 #[allow(dead_code)]
@@ -85,13 +86,19 @@ impl Receiver {
                 channel_id,
                 metrics,
                 guild_metrics,
+                last_voice_packet_time: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
             }),
         }
+    }
+
+    pub fn last_voice_packet_time(&self) -> i64 {
+        self.inner.last_voice_packet_time.load(Ordering::Relaxed)
     }
 }
 
 #[async_trait]
 impl VoiceEventHandler for Receiver {
+    #[tracing::instrument(skip_all, name = "receiver_act")]
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
         use EventContext as Ctx;
         match ctx {
@@ -339,6 +346,21 @@ impl VoiceEventHandler for Receiver {
                 // Those are the un decoded opus packets
             }
             Ctx::VoiceTick(tick) => {
+                if !tick.speaking.is_empty() {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    self.inner
+                        .last_voice_packet_time
+                        .store(now, Ordering::Relaxed);
+                    self.inner
+                        .metrics
+                        .last_voice_packet_time
+                        .store(now, Ordering::Relaxed);
+                    self.inner
+                        .guild_metrics
+                        .last_voice_packet_time
+                        .store(now, Ordering::Relaxed);
+                }
+
                 for (ssrc, data) in &tick.speaking {
                     self.inner
                         .metrics
@@ -455,6 +477,7 @@ impl VoiceEventHandler for Receiver {
     }
 }
 
+#[tracing::instrument(skip_all, name = "spawn_ffmpeg")]
 fn spawn_ffmpeg(path: &str) -> Result<Child, std::io::Error> {
     Command::new("ffmpeg")
         // .arg("-re") // realtime
@@ -481,6 +504,7 @@ fn spawn_ffmpeg(path: &str) -> Result<Child, std::io::Error> {
 }
 
 // TODO: username instead of id
+#[tracing::instrument(skip_all, name = "create_path")]
 async fn create_path(
     _self: &Receiver,
     now: chrono::DateTime<chrono::Utc>,

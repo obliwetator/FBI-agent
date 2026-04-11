@@ -82,6 +82,7 @@ impl Dashboard for MyJammer {
                 let mut process_open_fds = 0;
                 let mut tokio_active_tasks = 0;
                 let mut messages_received = 0;
+                let mut last_voice_packet_time = 0;
 
                 if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                     commands_executed = metrics.commands_executed.load(Ordering::Relaxed) as i32;
@@ -109,6 +110,7 @@ impl Dashboard for MyJammer {
                     process_open_fds = metrics.process_open_fds.load(Ordering::Relaxed) as i32;
                     tokio_active_tasks = metrics.tokio_active_tasks.load(Ordering::Relaxed) as i32;
                     messages_received = metrics.messages_received.load(Ordering::Relaxed) as i32;
+                    last_voice_packet_time = metrics.last_voice_packet_time.load(Ordering::Relaxed);
                 }
 
                 if let Some(_songbird) = data_guard.get::<SongbirdKey>() {
@@ -137,6 +139,7 @@ impl Dashboard for MyJammer {
                     process_open_fds,
                     tokio_active_tasks,
                     messages_received,
+                    last_voice_packet_time,
                 };
 
                 if tx.send(Ok(response)).await.is_err() {
@@ -233,6 +236,7 @@ impl Dashboard for MyJammer {
                     let mut process_open_fds_ds = 0i32;
                     let mut tokio_active_tasks_ds = 0i32;
                     let mut messages_received_ds = 0i32;
+                    let mut last_voice_packet_time_ds = 0i64;
 
                     if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
                         commands_executed =
@@ -269,6 +273,8 @@ impl Dashboard for MyJammer {
                             metrics.tokio_active_tasks.load(Ordering::Relaxed) as i32;
                         messages_received_ds =
                             metrics.messages_received.load(Ordering::Relaxed) as i32;
+                        last_voice_packet_time_ds =
+                            metrics.last_voice_packet_time.load(Ordering::Relaxed);
                     }
 
                     let mut guilds = Vec::new();
@@ -308,6 +314,7 @@ impl Dashboard for MyJammer {
                         "process_open_fds": process_open_fds_ds,
                         "tokio_active_tasks": tokio_active_tasks_ds,
                         "messages_received": messages_received_ds,
+                        "last_voice_packet_time": last_voice_packet_time_ds,
                     });
 
                     let event = hello_world::DashboardEvent {
@@ -370,6 +377,7 @@ impl Dashboard for MyJammer {
                                     "ffmpeg_process_crashes": m.ffmpeg_process_crashes.load(Ordering::Relaxed),
                                     "audio_packets_received": m.audio_packets_received.load(Ordering::Relaxed),
                                     "audio_packets_dropped": m.audio_packets_dropped.load(Ordering::Relaxed),
+                                    "last_voice_packet_time": m.last_voice_packet_time.load(Ordering::Relaxed),
                                 })
                             });
 
