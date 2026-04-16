@@ -36,7 +36,20 @@ pub fn init_telemetry() {
 
     let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    let subscriber = Registry::default().with(telemetry).with(
+    let file_appender = tracing_appender::rolling::daily("logs", "fbi-agent.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // We intentionally leak the guard so the background writer stays alive.
+    // Ideally this would be returned and kept in main(), but leaking it works
+    // for global long-running daemons.
+    std::mem::forget(_guard);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_writer(non_blocking)
+        .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
+
+    let subscriber = Registry::default().with(telemetry).with(file_layer).with(
         tracing_subscriber::fmt::layer()
             .pretty()
             .with_filter(tracing_subscriber::filter::LevelFilter::INFO),

@@ -63,7 +63,16 @@ pub async fn guild_member_update(
     _old_if_available: Option<serenity::model::guild::Member>,
     _new: serenity::model::guild::Member,
 ) {
-    todo!()
+    if _new.user.bot {
+        return;
+    }
+    crate::database::user_names::observe(
+        &_self.database,
+        _new.guild_id.get(),
+        &_new.user,
+        Some(&_new),
+    )
+    .await;
 }
 
 pub async fn guild_members_chunk(

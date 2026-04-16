@@ -50,7 +50,9 @@ pub struct BotMetrics {
     pub guild_recording_metrics: dashmap::DashMap<u64, Arc<GuildRecordingMetrics>>,
     // Discord gateway health
     pub gateway_reconnects: AtomicU32,
+    pub gateway_disconnects: AtomicU32,
     pub driver_reconnects: AtomicU32,
+    pub driver_disconnects: AtomicU32,
     pub voice_state_updates_received: AtomicU64,
     // Database health
     pub db_query_errors: AtomicU32,
@@ -88,6 +90,50 @@ impl BotMetrics {
                         .load(std::sync::atomic::Ordering::Relaxed),
                     &[],
                 );
+            })
+            .build();
+
+        let m4_guild = metrics.clone();
+        meter
+            .u64_observable_gauge("guild_active_recordings")
+            .with_description("Number of active recordings per guild")
+            .with_callback(move |observer| {
+                for entry in m4_guild.guild_recording_metrics.iter() {
+                    let guild_id = entry.key();
+                    let guild_metrics = entry.value();
+                    observer.observe(
+                        guild_metrics
+                            .active_recordings
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as u64,
+                        &[opentelemetry::KeyValue::new(
+                            "guild_id",
+                            guild_id.to_string(),
+                        )],
+                    );
+                }
+            })
+            .build();
+
+        let m_crash_guild = metrics.clone();
+        meter
+            .u64_observable_gauge("guild_ffmpeg_process_crashes")
+            .with_description("Number of ffmpeg process crashes per guild")
+            .with_callback(move |observer| {
+                for entry in m_crash_guild.guild_recording_metrics.iter() {
+                    let guild_id = entry.key();
+                    let guild_metrics = entry.value();
+                    observer.observe(
+                        guild_metrics
+                            .ffmpeg_process_crashes
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as u64,
+                        &[opentelemetry::KeyValue::new(
+                            "guild_id",
+                            guild_id.to_string(),
+                        )],
+                    );
+                }
             })
             .build();
 
@@ -150,6 +196,92 @@ impl BotMetrics {
             .with_callback(move |observer| {
                 observer.observe(
                     m6.tokio_active_tasks
+                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
+                    &[],
+                );
+            })
+            .build();
+
+        let m7 = metrics.clone();
+        meter
+            .u64_observable_gauge("audio_packets_dropped")
+            .with_description("Total audio packets dropped globally")
+            .with_callback(move |observer| {
+                observer.observe(
+                    m7.audio_packets_dropped
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    &[],
+                );
+            })
+            .build();
+
+        let m8 = metrics.clone();
+        meter
+            .u64_observable_gauge("guild_audio_packets_dropped")
+            .with_description("Number of audio packets dropped per guild")
+            .with_callback(move |observer| {
+                for entry in m8.guild_recording_metrics.iter() {
+                    let guild_id = entry.key();
+                    let guild_metrics = entry.value();
+                    observer.observe(
+                        guild_metrics
+                            .audio_packets_dropped
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        &[opentelemetry::KeyValue::new(
+                            "guild_id",
+                            guild_id.to_string(),
+                        )],
+                    );
+                }
+            })
+            .build();
+
+        let m9 = metrics.clone();
+        meter
+            .u64_observable_gauge("gateway_reconnects")
+            .with_description("Total Discord gateway reconnects")
+            .with_callback(move |observer| {
+                observer.observe(
+                    m9.gateway_reconnects
+                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
+                    &[],
+                );
+            })
+            .build();
+
+        let m10 = metrics.clone();
+        meter
+            .u64_observable_gauge("gateway_disconnects")
+            .with_description("Total Discord gateway disconnects")
+            .with_callback(move |observer| {
+                observer.observe(
+                    m10.gateway_disconnects
+                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
+                    &[],
+                );
+            })
+            .build();
+
+        let m11 = metrics.clone();
+        meter
+            .u64_observable_gauge("driver_reconnects")
+            .with_description("Total Songbird driver reconnects")
+            .with_callback(move |observer| {
+                observer.observe(
+                    m11.driver_reconnects
+                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
+                    &[],
+                );
+            })
+            .build();
+
+        let m12 = metrics.clone();
+        meter
+            .u64_observable_gauge("driver_disconnects")
+            .with_description("Total Songbird driver disconnects")
+            .with_callback(move |observer| {
+                observer.observe(
+                    m12.driver_disconnects
                         .load(std::sync::atomic::Ordering::Relaxed) as u64,
                     &[],
                 );
@@ -221,7 +353,9 @@ impl Default for BotMetrics {
             last_voice_packet_time: AtomicI64::new(0),
             guild_recording_metrics: dashmap::DashMap::new(),
             gateway_reconnects: AtomicU32::new(0),
+            gateway_disconnects: AtomicU32::new(0),
             driver_reconnects: AtomicU32::new(0),
+            driver_disconnects: AtomicU32::new(0),
             voice_state_updates_received: AtomicU64::new(0),
             db_query_errors: AtomicU32::new(0),
             db_insert_failures: AtomicU32::new(0),

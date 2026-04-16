@@ -1,4 +1,5 @@
 pub mod channels;
+pub mod user_names;
 
 use crate::event_handler::Handler;
 use serenity::{
