@@ -25,6 +25,14 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                 "queue" => handle_queue(&application_command, &ctx).await,
                 "skip" => handle_skip(&application_command, &ctx).await,
                 "stop" => handle_stop(&application_command, &ctx).await,
+                "stamp" => {
+                    crate::commands::stamp::handle_stamp(
+                        &application_command,
+                        &ctx,
+                        &_self.database,
+                    )
+                    .await
+                }
                 _ => format!(
                     "Unknown application_command with the name {}",
                     application_command.data.name

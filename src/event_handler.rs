@@ -78,7 +78,25 @@ impl EventHandler for Handler {
         let _ = database::update_info(self, &ctx, &guilds).await;
         let _ = database::channels::update_guilds(self, &ctx, &guilds).await;
         let _ = database::channels::update_guild_channels(self, &ctx, &guilds).await;
+        database::user_names::seed_from_guilds(&self.database, guild_cached).await;
     }
+
+    async fn resume(&self, _ctx: Context, _: serenity::model::event::ResumedEvent) {
+        info!("Resumed");
+        let data_read = _ctx.data.read().await;
+        if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
+            metrics
+                .gateway_reconnects
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = metrics.update_tx.send(());
+        }
+    }
+
+    // `EventHandler` in Serenity exposes `shard_status_update` and other events for disconnected states,
+    // but the actual connection events are usually managed by individual Shards.
+    // For now, let's use the explicit `shard_stage_update` or just log `gateway_disconnects` on reconnects if needed.
+    // Actually, `EventHandler` doesn't have a direct `disconnect` function. But tracking `gateway_reconnects`
+    // inherently implies a disconnect happened before it!
 
     async fn channel_pins_update(
         &self,
@@ -175,6 +193,18 @@ impl EventHandler for Handler {
         _chunk: serenity::model::event::GuildMembersChunkEvent,
     ) {
         events::guilds::guild_members_chunk(self, _ctx, _chunk).await;
+    }
+
+    async fn guild_member_update(
+        &self,
+        _ctx: Context,
+        _old_if_available: Option<serenity::model::guild::Member>,
+        _new: Option<serenity::model::guild::Member>,
+        _event: serenity::model::event::GuildMemberUpdateEvent,
+    ) {
+        if let Some(member) = _new {
+            events::guilds::guild_member_update(self, _ctx, _old_if_available, member).await;
+        }
     }
 
     async fn guild_role_create(&self, _ctx: Context, _new: serenity::model::guild::Role) {
@@ -310,22 +340,12 @@ impl EventHandler for Handler {
                 crate::commands::voice_controls::register_queue(),
                 crate::commands::voice_controls::register_skip(),
                 crate::commands::voice_controls::register_stop(),
+                crate::commands::stamp::register_stamp(),
             ],
         )
         .await
         {
             info!("Cannot register global slash commands: {}", why);
-        }
-    }
-
-    async fn resume(&self, _ctx: Context, _: serenity::model::event::ResumedEvent) {
-        info!("Resumed");
-        let data_read = _ctx.data.read().await;
-        if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
-            metrics
-                .gateway_reconnects
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let _ = metrics.update_tx.send(());
         }
     }
 
