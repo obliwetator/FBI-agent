@@ -15,6 +15,10 @@ pub fn register_stamp() -> CreateCommand {
                 .required(true),
         )
         .add_option(
+            CreateCommandOption::new(CommandOptionType::String, "note", "Optional note")
+                .required(false),
+        )
+        .add_option(
             CreateCommandOption::new(
                 CommandOptionType::Integer,
                 "rewind",
@@ -23,10 +27,6 @@ pub fn register_stamp() -> CreateCommand {
             .min_int_value(0)
             .max_int_value(60)
             .required(false),
-        )
-        .add_option(
-            CreateCommandOption::new(CommandOptionType::String, "note", "Optional note")
-                .required(false),
         )
 }
 
@@ -67,7 +67,8 @@ pub async fn handle_stamp(
         None => return "You must be in a voice channel to use /stamp.".to_string(),
     };
 
-    crate::database::user_names::observe(pool, guild_id.get(), &application_command.user, None).await;
+    crate::database::user_names::observe(pool, guild_id.get(), &application_command.user, None)
+        .await;
     if let Ok(target_user) = target.to_user(&ctx.http).await {
         crate::database::user_names::observe(pool, guild_id.get(), &target_user, None).await;
     }
@@ -157,7 +158,12 @@ pub async fn handle_stamp(
             } else {
                 " (no active recording — stamp kept by timestamp)"
             };
-            format!("Stamped <@{}> at <t:{}:T>{}", target.get(), now_ms / 1000, suffix)
+            format!(
+                "Stamped <@{}> at <t:{}:T>{}",
+                target.get(),
+                now_ms / 1000,
+                suffix
+            )
         }
         Err(e) => {
             warn!("Failed to insert stamp: {}", e);

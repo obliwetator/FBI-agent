@@ -20,6 +20,7 @@ pub use metrics::*;
 
 pub mod commands;
 pub mod config;
+pub mod cooldown;
 mod database;
 pub mod event_handler;
 pub mod events;
@@ -46,6 +47,7 @@ pub struct Custom {
     _http: Arc<Http>,
     data: Arc<RwLock<TypeMap>>,
     pub pool: sqlx::Pool<sqlx::Postgres>,
+    pub jam_cooldown: crate::cooldown::JamCooldown,
 }
 
 pub async fn get_lock_read(ctx: &Context) -> Arc<RwLock<HashMap<u64, Option<u64>>>> {
@@ -106,9 +108,12 @@ async fn main() {
     // Create a new instance of the Client, logging in as a bot. This will
     // automatically prepend your bot token with "Bot ", which is a requirement
     // by Discord for bot users.
+    let jam_cooldown = crate::cooldown::JamCooldown::new();
+
     let mut client = Client::builder(token, intents)
         .event_handler(Handler {
             database: pool.clone(),
+            jam_cooldown: jam_cooldown.clone(),
         })
         .intents(intents)
         .register_songbird_from_config(songbird_config)
@@ -132,6 +137,7 @@ async fn main() {
         _http: http,
         data,
         pool: pool.clone(),
+        jam_cooldown: jam_cooldown.clone(),
     };
 
     // Grab the metrics Arc before moving `client` into the spawn below.

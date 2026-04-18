@@ -463,6 +463,22 @@ impl Jammer for MyJammer {
 
         let data = request.into_inner();
 
+        match self
+            .data_cache
+            .jam_cooldown
+            .check_and_record(&self.data_cache.pool, data.guild_id, data.user_id)
+            .await
+        {
+            crate::cooldown::CheckResult::Allowed => {}
+            crate::cooldown::CheckResult::OnCooldown { remaining_secs } => {
+                let reply = JamResponse {
+                    resp: JamResponseEnum::Cooldown.into(),
+                    cooldown_remaining_seconds: remaining_secs,
+                };
+                return Ok(Response::new(reply));
+            }
+        }
+
         let guild = match self
             .data_cache
             .cache
@@ -472,6 +488,7 @@ impl Jammer for MyJammer {
             None => {
                 let reply = JamResponse {
                     resp: JamResponseEnum::Unkown.into(),
+                    cooldown_remaining_seconds: 0,
                 };
                 return Ok(Response::new(reply));
                 // return (StatusCode::OK, Json(json!({ "code": Ras::Unkown })));
@@ -504,6 +521,7 @@ impl Jammer for MyJammer {
 
                             let reply = JamResponse {
                                 resp: JamResponseEnum::Ok.into(),
+                                cooldown_remaining_seconds: 0,
                             };
                             return Ok(Response::new(reply));
                         }
@@ -515,6 +533,7 @@ impl Jammer for MyJammer {
 
         let reply = JamResponse {
             resp: JamResponseEnum::NotPressent.into(),
+            cooldown_remaining_seconds: 0,
         };
         return Ok(Response::new(reply));
     }

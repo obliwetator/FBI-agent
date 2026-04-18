@@ -1,8 +1,8 @@
 use serenity::{
-    all::{CommandDataOptionValue, CommandInteraction, Interaction},
+    all::{ButtonStyle, CommandDataOptionValue, CommandInteraction, Interaction},
     builder::{
-        AutocompleteChoice, CreateAutocompleteResponse, CreateInteractionResponse,
-        CreateInteractionResponseMessage,
+        AutocompleteChoice, CreateActionRow, CreateAutocompleteResponse, CreateButton,
+        CreateInteractionResponse, CreateInteractionResponseMessage,
     },
     client::Context,
 };
@@ -18,46 +18,85 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
             warn!("Unhandled interaction type: Ping");
         }
         Interaction::Command(application_command) => {
-            let content = match application_command.data.name.as_str() {
-                "help" => ":(".to_string(),
-                "play" => handle_play_audio(&application_command, &ctx, "").await,
-                "jam" => handle_jam(&application_command, &ctx, &_self.database).await,
-                "queue" => handle_queue(&application_command, &ctx).await,
-                "skip" => handle_skip(&application_command, &ctx).await,
-                "stop" => handle_stop(&application_command, &ctx).await,
-                "stamp" => {
-                    crate::commands::stamp::handle_stamp(
+            let mut response_msg = CreateInteractionResponseMessage::new().ephemeral(true);
+
+            match application_command.data.name.as_str() {
+                "help" => response_msg = response_msg.content(":("),
+                "play" => {
+                    response_msg =
+                        response_msg.content(handle_play_audio(&application_command, &ctx, "").await)
+                }
+                "jam" => {
+                    let (content, clip_id) = handle_jam(
                         &application_command,
                         &ctx,
                         &_self.database,
+                        &_self.jam_cooldown,
                     )
-                    .await
+                    .await;
+                    response_msg = response_msg.content(content);
+                    if let Some(cid) = clip_id {
+                        let button = CreateButton::new(format!("jam_replay:{}", cid))
+                            .label("Replay")
+                            .style(ButtonStyle::Primary);
+                        response_msg =
+                            response_msg.components(vec![CreateActionRow::Buttons(vec![button])]);
+                    }
                 }
-                _ => format!(
-                    "Unknown application_command with the name {}",
-                    application_command.data.name
-                ),
-            };
+                "queue" => {
+                    response_msg = response_msg.content(handle_queue(&application_command, &ctx).await)
+                }
+                "skip" => {
+                    response_msg = response_msg.content(handle_skip(&application_command, &ctx).await)
+                }
+                "stop" => {
+                    response_msg = response_msg.content(handle_stop(&application_command, &ctx).await)
+                }
+                "stamp" => {
+                    response_msg = response_msg.content(
+                        crate::commands::stamp::handle_stamp(
+                            &application_command,
+                            &ctx,
+                            &_self.database,
+                        )
+                        .await,
+                    )
+                }
+                other => {
+                    response_msg = response_msg
+                        .content(format!("Unknown application_command with the name {}", other))
+                }
+            }
 
             if let Err(why) = application_command
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content(content)
-                            .ephemeral(true),
-                    ),
-                )
+                .create_response(&ctx.http, CreateInteractionResponse::Message(response_msg))
                 .await
             {
                 info!("Cannot respond to slash command: {}", why);
             }
         }
         Interaction::Component(component) => {
-            warn!(
-                "Unhandled interaction type: Component (id={})",
-                component.data.custom_id
-            );
+            if let Some(clip_id) = component.data.custom_id.strip_prefix("jam_replay:") {
+                let content = replay_clip(clip_id, &component.guild_id, &ctx, &_self.database).await;
+                if let Err(why) = component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(content)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await
+                {
+                    info!("Cannot respond to replay button: {}", why);
+                }
+            } else {
+                warn!(
+                    "Unhandled interaction type: Component (id={})",
+                    component.data.custom_id
+                );
+            }
         }
         Interaction::Autocomplete(autocomplete) => {
             if autocomplete.data.name == "jam" {
@@ -141,7 +180,8 @@ async fn handle_jam(
     application_command: &CommandInteraction,
     ctx: &Context,
     pool: &sqlx::Pool<sqlx::Postgres>,
-) -> String {
+    cooldown: &crate::cooldown::JamCooldown,
+) -> (String, Option<String>) {
     info!("Handling jam command: {:?}", application_command.data);
 
     let clip_name = application_command.data.options.first().and_then(|o| {
@@ -156,7 +196,7 @@ async fn handle_jam(
         Some(f) => f,
         None => {
             warn!("Jam command missing clip name");
-            return "Please provide a clip name.".to_string();
+            return ("Please provide a clip name.".to_string(), None);
         }
     };
 
@@ -166,7 +206,7 @@ async fn handle_jam(
         Some(m) => m,
         None => {
             warn!("Songbird manager not found");
-            return "Voice system is not configured.".to_string();
+            return ("Voice system is not configured.".to_string(), None);
         }
     };
 
@@ -174,9 +214,26 @@ async fn handle_jam(
         Some(id) => id,
         None => {
             warn!("Command not in a server");
-            return "This command can only be used in a server.".to_string();
+            return (
+                "This command can only be used in a server.".to_string(),
+                None,
+            );
         }
     };
+
+    let user_id = application_command.user.id.get() as i64;
+    match cooldown
+        .check_and_record(pool, guild_id.get() as i64, user_id)
+        .await
+    {
+        crate::cooldown::CheckResult::Allowed => {}
+        crate::cooldown::CheckResult::OnCooldown { remaining_secs } => {
+            return (
+                format!("On cooldown — {}s remaining.", remaining_secs),
+                None,
+            );
+        }
+    }
 
     info!(
         "Attempting to play clip {} in guild {}",
@@ -186,12 +243,34 @@ async fn handle_jam(
     match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, &clip_name).await {
         Ok(msg) => {
             info!("Successfully played clip: {}", msg);
-            msg
+            (msg, Some(clip_name))
         }
         Err(e) => {
             warn!("Failed to play clip: {}", e);
-            e
+            (e, None)
         }
+    }
+}
+
+async fn replay_clip(
+    clip_id: &str,
+    guild_id: &Option<serenity::model::prelude::GuildId>,
+    ctx: &Context,
+    pool: &sqlx::Pool<sqlx::Postgres>,
+) -> String {
+    let manager = match songbird::get(ctx).await {
+        Some(m) => m,
+        None => return "Voice system is not configured.".to_string(),
+    };
+
+    let guild_id = match guild_id {
+        Some(id) => *id,
+        None => return "This command can only be used in a server.".to_string(),
+    };
+
+    match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, clip_id).await {
+        Ok(msg) => msg,
+        Err(e) => e,
     }
 }
 
