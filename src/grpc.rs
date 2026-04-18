@@ -514,6 +514,7 @@ impl Jammer for MyJammer {
                             handle_play_audio_to_channel(
                                 data.guild_id,
                                 &data.clip_name,
+                                data.user_id,
                                 self.data_cache.data.clone(),
                                 self.data_cache.pool.clone(),
                             )
@@ -542,6 +543,7 @@ impl Jammer for MyJammer {
 async fn handle_play_audio_to_channel(
     id: i64,
     clip_name: &str,
+    user_id: i64,
     data: Arc<RwLock<TypeMap>>,
     pool: sqlx::Pool<sqlx::Postgres>,
 ) {
@@ -552,7 +554,7 @@ async fn handle_play_audio_to_channel(
 
     let guild_id = GuildId::new(id.try_into().unwrap());
     if let Err(e) =
-        crate::commands::voice_controls::play_clip(&pool, &manager, guild_id, clip_name).await
+        crate::commands::voice_controls::play_clip(&pool, &manager, guild_id, clip_name, user_id).await
     {
         tracing::error!("Failed to play clip from grpc: {}", e);
     }

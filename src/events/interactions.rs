@@ -77,7 +77,16 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
         }
         Interaction::Component(component) => {
             if let Some(clip_id) = component.data.custom_id.strip_prefix("jam_replay:") {
-                let content = replay_clip(clip_id, &component.guild_id, &ctx, &_self.database).await;
+                let user_id = component.user.id.get() as i64;
+                let content = replay_clip(
+                    clip_id,
+                    &component.guild_id,
+                    &ctx,
+                    &_self.database,
+                    &_self.jam_cooldown,
+                    user_id,
+                )
+                .await;
                 if let Err(why) = component
                     .create_response(
                         &ctx.http,
@@ -240,7 +249,7 @@ async fn handle_jam(
         clip_name, guild_id
     );
 
-    match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, &clip_name).await {
+    match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, &clip_name, user_id).await {
         Ok(msg) => {
             info!("Successfully played clip: {}", msg);
             (msg, Some(clip_name))
@@ -257,6 +266,8 @@ async fn replay_clip(
     guild_id: &Option<serenity::model::prelude::GuildId>,
     ctx: &Context,
     pool: &sqlx::Pool<sqlx::Postgres>,
+    cooldown: &crate::cooldown::JamCooldown,
+    user_id: i64,
 ) -> String {
     let manager = match songbird::get(ctx).await {
         Some(m) => m,
@@ -268,7 +279,17 @@ async fn replay_clip(
         None => return "This command can only be used in a server.".to_string(),
     };
 
-    match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, clip_id).await {
+    match cooldown
+        .check_and_record(pool, guild_id.get() as i64, user_id)
+        .await
+    {
+        crate::cooldown::CheckResult::Allowed => {}
+        crate::cooldown::CheckResult::OnCooldown { remaining_secs } => {
+            return format!("On cooldown — {}s remaining.", remaining_secs);
+        }
+    }
+
+    match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, clip_id, user_id).await {
         Ok(msg) => msg,
         Err(e) => e,
     }

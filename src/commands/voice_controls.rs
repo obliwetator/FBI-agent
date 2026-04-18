@@ -12,6 +12,7 @@ pub async fn play_clip(
     manager: &std::sync::Arc<Songbird>,
     guild_id: GuildId,
     clip_id: &str,
+    user_id: i64,
 ) -> Result<String, String> {
     let row = sqlx::query!(
         "SELECT saved_file_name, name FROM clips WHERE guild_id = $1 AND clip_id = $2",
@@ -43,6 +44,24 @@ pub async fn play_clip(
 
     let handler_lock = handler.lock().await.enqueue(input.into()).await;
     let _ = handler_lock.set_volume(0.5);
+
+    if let Err(e) = sqlx::query!(
+        "INSERT INTO jam_invocations (user_id, guild_id, clip_id) VALUES ($1, $2, $3)",
+        user_id,
+        guild_id.get() as i64,
+        clip_id
+    )
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(
+            "Failed to record jam invocation (user={}, guild={}, clip={}): {}",
+            user_id,
+            guild_id,
+            clip_id,
+            e
+        );
+    }
 
     Ok(format!("Now jamming: {}", actual_name))
 }

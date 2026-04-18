@@ -58,6 +58,9 @@ impl JamCooldown {
     }
 }
 
+// No caching: every jam attempt does up to two DB round-trips (override + guild base).
+// Acceptable at current scale and means admin edits take effect immediately.
+// Add a short-TTL cache here if playback volume grows enough to make this hurt.
 async fn resolve_cooldown(
     pool: &Pool<Postgres>,
     guild_id: i64,
