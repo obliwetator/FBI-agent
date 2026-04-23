@@ -1,4 +1,5 @@
 use chrono::Datelike;
+use sakiot_paths::{CLIPS_ROOT, RECORDING_ROOT, RecordingKey};
 use serenity::{
     async_trait,
     client::Context,
@@ -20,8 +21,8 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
-pub const RECORDING_FILE_PATH: &str = "./voice_recordings";
-pub const CLIPS_FILE_PATH: &str = "./clips";
+pub const RECORDING_FILE_PATH: &str = RECORDING_ROOT;
+pub const CLIPS_FILE_PATH: &str = CLIPS_ROOT;
 
 #[repr(i32)]
 pub enum VoiceEventType {
@@ -684,7 +685,6 @@ fn spawn_ffmpeg(path: &str) -> Result<Child, std::io::Error> {
         .spawn()
 }
 
-// TODO: username instead of id
 #[tracing::instrument(skip_all, name = "create_path")]
 async fn create_path(
     _self: &Receiver,
@@ -697,29 +697,17 @@ async fn create_path(
     member: &serenity::model::guild::Member,
     is_channel_empty: bool,
 ) -> String {
-    let year = format!("{}", now.format("%Y"));
-    let month = format!("{}", now.month());
-    let day_number = format!("{}", now.format("%d"));
-    let day_name = format!("{}", now.format("%A"));
-    let hour = format!("{}", now.format("%H"));
-    let minute = format!("{}", now.format("%M"));
-    let seconds = format!("{}", now.format("%S"));
-
-    let dir_path = format!(
-        "{}/{}/{}/{}/{}/",
-        &RECORDING_FILE_PATH,
-        guild_id.get(),
-        channel_id.get(),
-        year,
-        month
+    let file_name = RecordingKey::stem_for(now.timestamp_millis(), user_id as i64);
+    let key = RecordingKey::new(
+        guild_id.get() as i64,
+        channel_id.get() as i64,
+        now.year(),
+        now.month(),
+        file_name.clone(),
     );
 
-    let file_name = format!(
-        "{}-{}-{}",
-        now.timestamp_millis(),
-        user_id,
-        member.user.name
-    );
+    let dir_path = key.recording_dir(RECORDING_ROOT);
+    let combined_path = key.recording_dir(RECORDING_ROOT).join(&file_name);
 
     {
         _self
@@ -729,21 +717,9 @@ async fn create_path(
             .await
             .insert(ssrc, file_name.to_owned());
     }
-    let combined_path = format!(
-        "{}/{}/{}/{}/{}/{}",
-        &RECORDING_FILE_PATH,
-        guild_id.get(),
-        channel_id.get(),
-        year,
-        month,
-        file_name
-    );
 
-    // Try to create the dir in case it does not exist
     if let Err(err) = std::fs::create_dir_all(&dir_path) {
-        error!("cannot create path {}: {}", dir_path, err);
-        // Returning an empty string or handling this more gracefully might be better
-        // but for now we avoid panicking the whole application.
+        error!("cannot create path {}: {}", dir_path.display(), err);
     };
 
     let null: Option<i64> = None;
@@ -782,5 +758,5 @@ async fn create_path(
         }
     };
 
-    combined_path
+    combined_path.to_string_lossy().into_owned()
 }
