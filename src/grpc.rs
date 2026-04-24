@@ -487,7 +487,7 @@ impl Jammer for MyJammer {
             Some(ok) => ok.to_owned(),
             None => {
                 let reply = JamResponse {
-                    resp: JamResponseEnum::Unkown.into(),
+                    resp: JamResponseEnum::Unknown.into(),
                     cooldown_remaining_seconds: 0,
                 };
                 return Ok(Response::new(reply));
@@ -533,7 +533,7 @@ impl Jammer for MyJammer {
         }
 
         let reply = JamResponse {
-            resp: JamResponseEnum::NotPressent.into(),
+            resp: JamResponseEnum::NotPresent.into(),
             cooldown_remaining_seconds: 0,
         };
         return Ok(Response::new(reply));
@@ -554,7 +554,8 @@ async fn handle_play_audio_to_channel(
 
     let guild_id = GuildId::new(id.try_into().unwrap());
     if let Err(e) =
-        crate::commands::voice_controls::play_clip(&pool, &manager, guild_id, clip_name, user_id).await
+        crate::commands::voice_controls::play_clip(&pool, &manager, guild_id, clip_name, user_id)
+            .await
     {
         tracing::error!("Failed to play clip from grpc: {}", e);
     }
