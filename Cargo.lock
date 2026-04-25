@@ -935,9 +935,11 @@ dependencies = [
  "console-subscriber",
  "crossbeam",
  "dashmap 6.1.0",
+ "ogg",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "opus2",
  "prost",
  "rustls 0.23.35",
  "sakiot-paths",
@@ -2436,6 +2438,15 @@ checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
 dependencies = [
  "libc",
  "objc2-core-foundation",
+]
+
+[[package]]
+name = "ogg"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdab8dcd8d4052eaacaf8fb07a3ccd9a6e26efadb42878a413c68fc4af1dee2b"
+dependencies = [
+ "byteorder",
 ]
 
 [[package]]
