@@ -7,7 +7,7 @@ use serenity::{
 };
 use songbird::{
     Event, EventContext, EventHandler as VoiceEventHandler,
-    packet::Packet,
+    packet::{Packet, PacketSize, rtp::RtpExtensionPacket},
     events::context_data::{ConnectData, DisconnectData},
     model::payload::{ClientDisconnect, Speaking},
 };
@@ -374,13 +374,29 @@ impl VoiceEventHandler for Receiver {
                         d.packet.as_ref().map(|rtp| {
                             let view = rtp.rtp();
                             let payload = view.payload();
+                            // NB: in songbird 0.6 VoiceTick, `payload_end_pad` is an
+                            // absolute end index into `payload`, not a tail-pad count
+                            // (see songbird/src/driver/tasks/udp_rx/ssrc_state.rs:86).
                             let start = rtp.payload_offset.min(payload.len());
-                            let end = payload.len().saturating_sub(rtp.payload_end_pad);
-                            if end > start {
-                                payload[start..end].to_vec()
-                            } else {
-                                Vec::new()
+                            let end = rtp.payload_end_pad.min(payload.len());
+                            if end <= start {
+                                return Vec::new();
                             }
+                            let body = &payload[start..end];
+                            // RTP header extension (Discord uses one-byte form) sits
+                            // inside the body — skip it before handing bytes to Opus.
+                            let opus = if view.get_extension() != 0 {
+                                match RtpExtensionPacket::new(body) {
+                                    Some(ext) => {
+                                        let off = ext.packet_size();
+                                        if off >= body.len() { &[][..] } else { &body[off..] }
+                                    }
+                                    None => body,
+                                }
+                            } else {
+                                body
+                            };
+                            opus.to_vec()
                         })
                     });
 
