@@ -7,29 +7,43 @@ use serenity::{
 };
 use songbird::{
     Event, EventContext, EventHandler as VoiceEventHandler,
+    packet::{Packet, PacketSize, rtp::RtpExtensionPacket},
     events::context_data::{ConnectData, DisconnectData},
     model::payload::{ClientDisconnect, Speaking},
 };
 use sqlx::{Pool, Postgres};
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::BufWriter;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use tokio::sync::RwLock;
-use tokio::{
-    io::AsyncWriteExt,
-    process::{Child, Command},
-};
+use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
+
+use crate::events::ogg_opus_writer::OggOpusWriter;
 
 pub const RECORDING_FILE_PATH: &str = RECORDING_ROOT;
 pub const CLIPS_FILE_PATH: &str = CLIPS_ROOT;
 
+/// 20 ms of audio per Opus packet — matches Discord's tick rate.
+const TICK_MS: i64 = 20;
+
 #[repr(i32)]
 pub enum VoiceEventType {
-    FfmpegSpawn = 1,
-    FfmpegExitSuccess = 2,
-    FfmpegCrash = 3,
+    WriterOpen = 1,
+    WriterClose = 2,
+    WriterError = 3,
     ZombieReaped = 4,
+}
+
+/// One per-user recording: the streaming writer plus the metadata needed to
+/// finalize the audio_files row when the writer closes.
+struct UserRecording {
+    writer: OggOpusWriter<BufWriter<File>>,
+    file_name: String,
+    start_time: chrono::DateTime<chrono::Utc>,
+    user_id: u64,
+    ssrc: u32,
 }
 
 #[derive(Clone)]
@@ -41,24 +55,19 @@ pub struct InnerReceiver {
     pool: Pool<Postgres>,
     channel_id: ChannelId,
     ctx_main: Arc<Context>,
-    now: Arc<RwLock<HashMap<u32, chrono::DateTime<chrono::Utc>>>>,
-    file_name: Arc<RwLock<HashMap<u32, String>>>,
     guild_id: GuildId,
-    ssrc_ffmpeg_hashmap: Arc<RwLock<HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
+    /// Active per-user recordings keyed by SSRC.
+    ssrc_writer_hashmap: Arc<RwLock<HashMap<u32, Arc<Mutex<UserRecording>>>>>,
     user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
     bot_ssrcs: Arc<RwLock<HashSet<u32>>>,
     bot_user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
     metrics: Arc<crate::BotMetrics>,
     guild_metrics: Arc<crate::GuildRecordingMetrics>,
     pub last_voice_packet_time: AtomicI64,
-}
-
-#[allow(dead_code)]
-struct VoiceChannelMembersData {
-    now: chrono::DateTime<chrono::Utc>,
-    file_name: String,
-    ssrc: u32,
-    ffmpeg_handle: Child,
+    /// Wallclock millisecond when the first non-bot user joined this session.
+    /// 0 = inactive. Used to pad new joiners' files with leading silence so
+    /// every per-user .ogg shares granule-zero = session-start.
+    session_start_ms: AtomicI64,
 }
 
 impl Drop for Receiver {
@@ -81,17 +90,12 @@ impl Receiver {
         channel_id: ChannelId,
         metrics: Arc<crate::BotMetrics>,
     ) -> Self {
-        // You can manage state here, such as a buffer of audio packet bytes, so
-        // you can later store them in intervals.
-
         let guild_metrics = metrics.guild_metrics(guild_id.get());
         let inner = Arc::new(InnerReceiver {
             pool,
-            now: Arc::new(RwLock::new(HashMap::new())),
-            file_name: Arc::new(RwLock::new(HashMap::new())),
             ctx_main: ctx,
             user_id_hashmap: Arc::new(RwLock::new(HashMap::new())),
-            ssrc_ffmpeg_hashmap: Arc::new(RwLock::new(HashMap::new())),
+            ssrc_writer_hashmap: Arc::new(RwLock::new(HashMap::new())),
             bot_ssrcs: Arc::new(RwLock::new(HashSet::new())),
             bot_user_id_hashmap: Arc::new(RwLock::new(HashMap::new())),
             guild_id,
@@ -99,6 +103,7 @@ impl Receiver {
             metrics,
             guild_metrics,
             last_voice_packet_time: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
+            session_start_ms: AtomicI64::new(0),
         });
 
         // Spawn Health Checker / Reaper
@@ -108,7 +113,6 @@ impl Receiver {
             loop {
                 interval.tick().await;
 
-                // If Receiver was dropped, break the loop to prevent memory leak
                 let inner_clone = match inner_weak.upgrade() {
                     Some(i) => i,
                     None => break,
@@ -116,7 +120,6 @@ impl Receiver {
 
                 let mut users_to_remove = Vec::new();
 
-                // Read the current users we are tracking
                 let user_map = inner_clone.user_id_hashmap.read().await;
                 if user_map.is_empty() {
                     continue;
@@ -124,7 +127,6 @@ impl Receiver {
 
                 if let Some(guild) = inner_clone.ctx_main.cache.guild(inner_clone.guild_id) {
                     for (&uid, &ssrc) in user_map.iter() {
-                        // Check if Discord still thinks the user is in the voice channel
                         if !guild
                             .voice_states
                             .contains_key(&serenity::model::id::UserId::new(uid))
@@ -137,32 +139,11 @@ impl Receiver {
 
                 for (uid, ssrc) in users_to_remove {
                     warn!(
-                        "Reaper: User {} (SSRC {}) is no longer in voice state, but process is alive. Reaping zombie.",
+                        "Reaper: User {} (SSRC {}) is no longer in voice state. Closing writer.",
                         uid, ssrc
                     );
-
                     inner_clone.user_id_hashmap.write().await.remove(&uid);
-
-                    // Dropping the tx from ssrc_ffmpeg_hashmap closes stdin, gracefully stopping ffmpeg
-                    if inner_clone
-                        .ssrc_ffmpeg_hashmap
-                        .write()
-                        .await
-                        .remove(&ssrc)
-                        .is_some()
-                    {
-                        // Log audit event for the zombie reap
-                        let _ = sqlx::query(
-                            "INSERT INTO voice_events_audit (guild_id, user_id, ssrc, event_type_id, details) VALUES ($1, $2, $3, $4, $5)"
-                        )
-                        .bind(inner_clone.guild_id.get() as i64)
-                        .bind(uid as i64)
-                        .bind(ssrc as i64)
-                        .bind(VoiceEventType::ZombieReaped as i32)
-                        .bind("Reaper killed zombie process")
-                        .execute(&inner_clone.pool)
-                        .await;
-                    }
+                    finalize_writer(&inner_clone, ssrc, VoiceEventType::ZombieReaped).await;
                 }
             }
         });
@@ -189,17 +170,6 @@ impl VoiceEventHandler for Receiver {
                 ..
             }) => {
                 let _ = async {
-                // Discord voice calls use RTP, where every sender uses a randomly allocated
-                // *Synchronisation Source* (SSRC) to allow receivers to tell which audio
-                // stream a received packet belongs to. As this number is not derived from
-                // the sender's user_id, only Discord Voice Gateway messages like this one
-                // inform us about which random SSRC a user has been allocated. Future voice
-                // packets will contain *only* the SSRC.
-                //
-                // You can implement logic here so that you can differentiate users'
-                // SSRCs and map the SSRC to the User ID and maintain this state.
-                // Using this map, you can map the `ssrc` in `voice_packet`
-                // to the user ID and handle their audio packets separately.
                 info!(
                     "Speaking state update: user {:?} has SSRC {:?}, using {:?}",
                     user_id, ssrc, speaking,
@@ -259,22 +229,26 @@ impl VoiceEventHandler for Receiver {
                     }
 
                     {
-                        // Use a single write-lock for the check-and-insert to avoid a
-                        // TOCTOU race: if we checked with a read lock and then upgraded
-                        // to a write lock, another concurrent event could slip in between
-                        // and spawn a duplicate ffmpeg process for the same SSRC.
-                        let mut ffmpeg_map = self.inner.ssrc_ffmpeg_hashmap.write().await;
-                        if ffmpeg_map.contains_key(ssrc) {
-                            // we have already spawned a ffmpeg process
-                            // This should happen when the bot gets reconnected to the voice channel by the framework.
-                            error!("already got ffmpeg process");
+                        // Single write-lock for the check-and-insert to avoid TOCTOU.
+                        let mut writer_map = self.inner.ssrc_writer_hashmap.write().await;
+                        if writer_map.contains_key(ssrc) {
+                            error!("already got writer for ssrc {}", ssrc);
                         } else {
-                            info!("New ffmpeg process");
-                            // Create a process
+                            info!("New writer for ssrc {}", ssrc);
                             let now = chrono::Utc::now();
-                            {
-                                self.inner.now.write().await.insert(*ssrc, now);
-                            }
+                            let now_ms = now.timestamp_millis();
+
+                            // Anchor session start on first joiner; reuse for later joiners.
+                            let session_start = match self.inner.session_start_ms.compare_exchange(
+                                0,
+                                now_ms,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                            ) {
+                                Ok(_) => now_ms,
+                                Err(existing) => existing,
+                            };
+
                             let path = create_path(
                                 self,
                                 now,
@@ -287,31 +261,11 @@ impl VoiceEventHandler for Receiver {
                                 is_channel_empty,
                             )
                             .await;
-                            let mut child = match spawn_ffmpeg(&path) {
-                                Ok(c) => {
-                                    self.inner
-                                        .metrics
-                                        .active_recordings
-                                        .fetch_add(1, Ordering::Relaxed);
-                                    self.inner
-                                        .guild_metrics
-                                        .active_recordings
-                                        .fetch_add(1, Ordering::Relaxed);
-                                    c
-                                }
-                                Err(e) => {
-                                    error!("Failed to spawn ffmpeg for ssrc {}: {}", ssrc, e);
-                                    let _ = sqlx::query(
-                                        "INSERT INTO voice_events_audit (guild_id, user_id, ssrc, event_type_id, details) VALUES ($1, $2, $3, $4, $5)"
-                                    )
-                                    .bind(self.inner.guild_id.get() as i64)
-                                    .bind(user_id.0 as i64)
-                                    .bind(*ssrc as i64)
-                                    .bind(VoiceEventType::FfmpegCrash as i32)
-                                    .bind(format!("Failed to spawn: {}", e))
-                                    .execute(&self.inner.pool)
-                                    .await;
 
+                            let file = match File::create(format!("{}.ogg", path)) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    error!("Failed to create file for ssrc {}: {}", ssrc, e);
                                     self.inner
                                         .metrics
                                         .ffmpeg_spawn_failures
@@ -324,163 +278,56 @@ impl VoiceEventHandler for Receiver {
                                 }
                             };
 
-                            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4000);
+                            let mut writer = match OggOpusWriter::new(BufWriter::new(file), *ssrc, 0) {
+                                Ok(w) => w,
+                                Err(e) => {
+                                    error!("Failed to init OggOpusWriter for ssrc {}: {}", ssrc, e);
+                                    return None;
+                                }
+                            };
 
-                            ffmpeg_map.insert(*ssrc, tx);
-                            // Log successful spawn
+                            // Pad with leading silence so this file's granule-zero aligns
+                            // with session-start. First joiner: session_start == now_ms → 0 frames.
+                            let lead_ms = now_ms.saturating_sub(session_start);
+                            let lead_frames = (lead_ms / TICK_MS) as u64;
+                            if lead_frames > 0 {
+                                if let Err(e) = writer.write_silence(lead_frames) {
+                                    error!(
+                                        "Failed to write {} leading silence frames for ssrc {}: {}",
+                                        lead_frames, ssrc, e
+                                    );
+                                }
+                            }
+
+                            let file_name = RecordingKey::stem_for(now_ms, user_id.0 as i64);
+                            let recording = UserRecording {
+                                writer,
+                                file_name,
+                                start_time: now,
+                                user_id: user_id.0,
+                                ssrc: *ssrc,
+                            };
+                            writer_map.insert(*ssrc, Arc::new(Mutex::new(recording)));
+
+                            self.inner
+                                .metrics
+                                .active_recordings
+                                .fetch_add(1, Ordering::Relaxed);
+                            self.inner
+                                .guild_metrics
+                                .active_recordings
+                                .fetch_add(1, Ordering::Relaxed);
+
                             let _ = sqlx::query(
                                 "INSERT INTO voice_events_audit (guild_id, user_id, ssrc, event_type_id, details) VALUES ($1, $2, $3, $4, $5)"
                             )
                             .bind(self.inner.guild_id.get() as i64)
                             .bind(user_id.0 as i64)
                             .bind(*ssrc as i64)
-                            .bind(VoiceEventType::FfmpegSpawn as i32)
-                            .bind("Spawned successfully")
+                            .bind(VoiceEventType::WriterOpen as i32)
+                            .bind("Writer opened")
                             .execute(&self.inner.pool)
                             .await;
-
-                            // Drop the write lock now that the entry is committed, before
-                            // spawning the background task so VoiceTick can read immediately.
-                            drop(ffmpeg_map);
-
-                            let inner_clone = self.inner.clone();
-                            let guild_metrics_clone = self.inner.guild_metrics.clone();
-                            let ssrc_clone = *ssrc;
-                            let user_id_clone = user_id.0;
-
-                            tokio::spawn(async move {
-                                if let Some(mut stdin) = child.stdin.take() {
-                                    while let Some(data) = rx.recv().await {
-                                        if let Err(e) = stdin.write_all(&data).await {
-                                            error!("Failed to write to ffmpeg stdin: {}", e);
-                                            break;
-                                        }
-                                    }
-                                    info!(
-                                        "mpsc receiver channel for ssrc {} closed (rx.recv() returned None) or write failed. Closing ffmpeg stdin.",
-                                        ssrc_clone
-                                    );
-                                }
-
-                                info!("wait for child");
-                                let output = match child.wait_with_output().await {
-                                    Ok(out) => out,
-                                    Err(e) => {
-                                        error!("Failed to wait for child process: {}", e);
-                                        inner_clone
-                                            .metrics
-                                            .active_recordings
-                                            .fetch_sub(1, Ordering::Relaxed);
-                                        guild_metrics_clone
-                                            .active_recordings
-                                            .fetch_sub(1, Ordering::Relaxed);
-                                        return;
-                                    }
-                                };
-                                info!("wait is over");
-
-                                if !output.status.success() {
-                                    let code = output.status.code().unwrap_or(-1);
-                                    error!(
-                                        "ffmpeg exited with non-zero status {} for ssrc {}",
-                                        code, ssrc_clone
-                                    );
-
-                                    let _ = sqlx::query(
-                                        "INSERT INTO voice_events_audit (guild_id, user_id, ssrc, event_type_id, details) VALUES ($1, $2, $3, $4, $5)"
-                                    )
-                                    .bind(inner_clone.guild_id.get() as i64)
-                                    .bind(user_id_clone as i64)
-                                    .bind(ssrc_clone as i64)
-                                    .bind(VoiceEventType::FfmpegCrash as i32)
-                                    .bind(format!("Exited with status {}", code))
-                                    .execute(&inner_clone.pool)
-                                    .await;
-
-                                    inner_clone
-                                        .metrics
-                                        .ffmpeg_process_crashes
-                                        .fetch_add(1, Ordering::Relaxed);
-                                    guild_metrics_clone
-                                        .ffmpeg_process_crashes
-                                        .fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    let _ = sqlx::query(
-                                        "INSERT INTO voice_events_audit (guild_id, user_id, ssrc, event_type_id, details) VALUES ($1, $2, $3, $4, $5)"
-                                    )
-                                    .bind(inner_clone.guild_id.get() as i64)
-                                    .bind(user_id_clone as i64)
-                                    .bind(ssrc_clone as i64)
-                                    .bind(VoiceEventType::FfmpegExitSuccess as i32)
-                                    .bind("Exited successfully")
-                                    .execute(&inner_clone.pool)
-                                    .await;
-                                }
-                                inner_clone
-                                    .metrics
-                                    .active_recordings
-                                    .fetch_sub(1, Ordering::Relaxed);
-                                guild_metrics_clone
-                                    .active_recordings
-                                    .fetch_sub(1, Ordering::Relaxed);
-
-                                let lock_now = inner_clone.now.read().await;
-                                let now = match lock_now.get(&ssrc_clone) {
-                                    Some(t) => t,
-                                    None => {
-                                        error!("No start time found for ssrc {}", ssrc_clone);
-                                        return;
-                                    }
-                                };
-                                let time_elapsed = chrono::Utc::now()
-                                    .signed_duration_since(*now)
-                                    .num_milliseconds();
-                                drop(lock_now);
-
-                                let lock_file = inner_clone.file_name.read().await;
-                                let file_name = match lock_file.get(&ssrc_clone) {
-                                    Some(f) => f.clone(),
-                                    None => {
-                                        error!("No file name found for ssrc {}", ssrc_clone);
-                                        return;
-                                    }
-                                };
-                                drop(lock_file);
-
-                                let last_person_in_channel =
-                                    { inner_clone.user_id_hashmap.read().await.len() == 0 };
-                                // 2 = JOINED 3 = LAST
-                                let state = { if last_person_in_channel { 3 } else { 2 } };
-
-                                info!("File name :{}", file_name);
-
-                                match sqlx::query!(
-                                    "UPDATE audio_files
-                                        SET end_ts = audio_files.start_ts + $1, state_leave = $2
-                                        WHERE file_name = $3",
-                                    time_elapsed,
-                                    state,
-                                    file_name
-                                )
-                                .execute(&inner_clone.pool)
-                                .await
-                                {
-                                    Ok(_) => {
-                                        info!("Updated table row");
-                                    }
-                                    Err(err) => {
-                                        error!("{}", err);
-                                        inner_clone
-                                            .metrics
-                                            .db_query_errors
-                                            .fetch_add(1, Ordering::Relaxed);
-                                    }
-                                };
-
-                                // CRITICAL FIX: Ensure the transmitter is removed from the hashmap when the process ends
-                                // so that VoiceTick stops trying to send to a closed pipe, and future voice events can spawn a new process.
-                                inner_clone.ssrc_ffmpeg_hashmap.write().await.remove(&ssrc_clone);
-                            });
 
                             info!("1 file created for ssrc: {}", *ssrc);
                         }
@@ -490,8 +337,8 @@ impl VoiceEventHandler for Receiver {
             }.instrument(tracing::info_span!("SpeakingStateUpdate", ssrc = %ssrc, user_id = ?user_id)).await;
             }
 
-            Ctx::RtpPacket(packet) => {
-                // Those are the un decoded opus packets
+            Ctx::RtpPacket(_packet) => {
+                // Raw RTP — unused; we read Opus payload from VoiceTick instead.
             }
             Ctx::VoiceTick(tick) => {
                 if !tick.speaking.is_empty() {
@@ -509,77 +356,71 @@ impl VoiceEventHandler for Receiver {
                         .store(now, Ordering::Relaxed);
                 }
 
-                for (ssrc, data) in &tick.speaking {
-                    if self.inner.bot_ssrcs.read().await.contains(ssrc) {
-                        continue;
-                    }
+                // Snapshot the active SSRCs (skip bots).
+                let active: Vec<(u32, Arc<Mutex<UserRecording>>)> = {
+                    let map = self.inner.ssrc_writer_hashmap.read().await;
+                    let bots = self.inner.bot_ssrcs.read().await;
+                    map.iter()
+                        .filter(|(s, _)| !bots.contains(s))
+                        .map(|(s, w)| (*s, w.clone()))
+                        .collect()
+                };
 
-                    self.inner
-                        .metrics
-                        .audio_packets_received
-                        .fetch_add(1, Ordering::Relaxed);
-                    self.inner
-                        .guild_metrics
-                        .audio_packets_received
-                        .fetch_add(1, Ordering::Relaxed);
+                for (ssrc, recording) in active {
+                    let speaking_data = tick.speaking.get(&ssrc);
 
-                    let tx = {
-                        self.inner
-                            .ssrc_ffmpeg_hashmap
-                            .read()
-                            .await
-                            .get(ssrc)
-                            .cloned()
-                    };
-
-                    if let Some(tx) = tx {
-                        if let Some(decoded_voice) = data.decoded_voice.as_ref() {
-                            // Pre-allocate the exact byte count (2 bytes per i16 sample)
-                            // and convert synchronously — avoids creating ~1920 async futures
-                            // per 20ms tick that were previously caused by write_i16_le().await.
-                            let mut result: Vec<u8> = Vec::with_capacity(decoded_voice.len() * 2);
-                            for &n in decoded_voice {
-                                result.extend_from_slice(&n.to_le_bytes());
+                    // Pull the raw Opus payload bytes if the user spoke this tick.
+                    let opus_bytes: Option<Vec<u8>> = speaking_data.and_then(|d| {
+                        d.packet.as_ref().map(|rtp| {
+                            let view = rtp.rtp();
+                            let payload = view.payload();
+                            // NB: in songbird 0.6 VoiceTick, `payload_end_pad` is an
+                            // absolute end index into `payload`, not a tail-pad count
+                            // (see songbird/src/driver/tasks/udp_rx/ssrc_state.rs:86).
+                            let start = rtp.payload_offset.min(payload.len());
+                            let end = rtp.payload_end_pad.min(payload.len());
+                            if end <= start {
+                                return Vec::new();
                             }
-
-                            if let Err(e) = tx.try_send(result) {
-                                // Channel full means ffmpeg is temporarily behind.
-                                // This drops the packet rather than blocking the VoiceTick
-                                // handler (which would stall all other SSRCs too).
-                                //
-                                // Rate-limit the warning: only log once every 100 drops
-                                // per SSRC to avoid flooding the log.
-                                let count = self
-                                    .inner
-                                    .metrics
-                                    .audio_packets_dropped
-                                    .fetch_add(1, Ordering::Relaxed);
-                                self.inner
-                                    .guild_metrics
-                                    .audio_packets_dropped
-                                    .fetch_add(1, Ordering::Relaxed);
-                                if count % 100 == 0 {
-                                    warn!(
-                                        "Audio packet dropped for ssrc {} (total drops so far: {}): {}",
-                                        ssrc,
-                                        count + 1,
-                                        e
-                                    );
+                            let body = &payload[start..end];
+                            // RTP header extension (Discord uses one-byte form) sits
+                            // inside the body — skip it before handing bytes to Opus.
+                            let opus = if view.get_extension() != 0 {
+                                match RtpExtensionPacket::new(body) {
+                                    Some(ext) => {
+                                        let off = ext.packet_size();
+                                        if off >= body.len() { &[][..] } else { &body[off..] }
+                                    }
+                                    None => body,
                                 }
-                            }
-                        } else {
-                            error!("Decode disabled");
+                            } else {
+                                body
+                            };
+                            opus.to_vec()
+                        })
+                    });
+
+                    let mut rec = recording.lock().await;
+                    let result = match opus_bytes.as_deref() {
+                        Some(bytes) if !bytes.is_empty() => {
+                            self.inner
+                                .metrics
+                                .audio_packets_received
+                                .fetch_add(1, Ordering::Relaxed);
+                            self.inner
+                                .guild_metrics
+                                .audio_packets_received
+                                .fetch_add(1, Ordering::Relaxed);
+                            rec.writer.write_packet(bytes)
                         }
-                    } else {
-                        error!("No child");
+                        _ => rec.writer.write_silence(1),
+                    };
+                    if let Err(e) = result {
+                        error!("Writer error for ssrc {}: {}", ssrc, e);
                     }
                 }
             }
-            Ctx::RtcpPacket(data) => {
-                // An event which fires for every received rtcp packet,
-                // containing the call statistics and reporting information.
-                // info!("RTCP packet received: {:?}", data.packet);
-            }
+            Ctx::RtcpPacket(_data) => {}
 
             Ctx::DriverDisconnect(DisconnectData { kind, reason, .. }) => {
                 info!("Disconnected \n kind: {:?} \n reason {:?}", kind, reason);
@@ -589,13 +430,19 @@ impl VoiceEventHandler for Receiver {
                     .driver_disconnects
                     .fetch_add(1, Ordering::Relaxed);
 
-                // CRITICAL FIX: Explicitly clear the hashmaps on disconnect.
-                // This manually drops the `tx` channels, which breaks the circular reference deadlock
-                // and gracefully shuts down all zombie ffmpeg processes waiting on `rx`.
-                self.inner.ssrc_ffmpeg_hashmap.write().await.clear();
+                // Snapshot SSRCs and finalize each writer (writes EOS, runs DB update).
+                let ssrcs: Vec<u32> = {
+                    let map = self.inner.ssrc_writer_hashmap.read().await;
+                    map.keys().copied().collect()
+                };
+                for ssrc in ssrcs {
+                    finalize_writer(&self.inner, ssrc, VoiceEventType::WriterClose).await;
+                }
+
                 self.inner.user_id_hashmap.write().await.clear();
                 self.inner.bot_ssrcs.write().await.clear();
                 self.inner.bot_user_id_hashmap.write().await.clear();
+                self.inner.session_start_ms.store(0, Ordering::SeqCst);
             }
             Ctx::DriverConnect(ConnectData { .. }) => {
                 info!("Connected")
@@ -632,25 +479,13 @@ impl VoiceEventHandler for Receiver {
                         }
                     };
 
-                    // By removing the sender from the hash map, the `mpsc::Sender` is dropped.
-                    // This causes `rx.recv().await` in the spawned task to return None,
-                    // which closes `ffmpeg`'s stdin and proceeds to finish the process and run the DB updates.
-                    match self.inner.ssrc_ffmpeg_hashmap.write().await.remove(&ssrc) {
-                        Some(_) => {
-                            info!("Removed sender for ssrc {}", ssrc);
-                        }
-                        None => {
-                            error!("No child process found for ssrc {}", ssrc);
-                            return None;
-                        }
-                    };
+                    finalize_writer(&self.inner, ssrc, VoiceEventType::WriterClose).await;
                     None::<Event>
                 }
                 .instrument(tracing::info_span!("ClientDisconnect", user_id = %user_id))
                 .await;
             }
             _ => {
-                // We won't be registering this struct for any more event classes.
                 unimplemented!()
             }
         }
@@ -659,30 +494,84 @@ impl VoiceEventHandler for Receiver {
     }
 }
 
-#[tracing::instrument(skip_all, name = "spawn_ffmpeg")]
-fn spawn_ffmpeg(path: &str) -> Result<Child, std::io::Error> {
-    Command::new("ffmpeg")
-        // .arg("-re") // realtime
-        .args(["-use_wallclock_as_timestamps", "true"]) // Attach timestamps to packets. Read -af aresample=async=1
-        .args(["-f", "s16le"]) // input type
-        .args(["-channel_layout", "stereo"])
-        .args(["-ar", "48000"]) // sample rate
-        .args(["-ac", "2"]) // channel count
-        .args(["-i", "pipe:0"]) // Input name
-        .args(["-c:a", "libvorbis"])
-        .args(["-async", "1"]) // this will input silence when there is no packets coming.
-        // HOWEVER. It will not work if the packets do not have a timestamp attached to them. We can tell ffmpeg to attach its own timestamps and figure the timings by itself
-        .args(["-flush_packets", "1"]) // Write to the file on every packet. While this is wasteful it allows semi realtime audio playback.
-        .arg(format!("{}.ogg", path)) // output
-        .stdin(std::process::Stdio::piped())
-        // stdout: ffmpeg writes nothing useful to stdout for this use case.
-        .stdout(std::process::Stdio::null())
-        // stderr: piped so we can drain it continuously in a background reader.
-        // Do NOT use Stdio::null() here if you want to see ffmpeg errors.
-        // Do NOT use wait_with_output() to read it — that only reads after the
-        // process exits, letting the 64 KB pipe buffer fill and deadlock ffmpeg.
-        .stderr(std::process::Stdio::null())
-        .spawn()
+/// Close the writer for `ssrc`, run the audio_files DB update, decrement
+/// active counters. Idempotent — silently no-ops if the writer is already gone.
+async fn finalize_writer(
+    inner: &Arc<InnerReceiver>,
+    ssrc: u32,
+    event_type: VoiceEventType,
+) {
+    let entry = inner.ssrc_writer_hashmap.write().await.remove(&ssrc);
+    let Some(arc) = entry else {
+        return;
+    };
+
+    // Lock the writer to wait out any in-flight tick write, then finalize.
+    // We don't try to unwrap the Arc; we just clone the metadata we need
+    // and let the Arc drop naturally after this scope.
+    let mut rec = arc.lock().await;
+
+    if let Err(e) = rec.writer.finish() {
+        error!("Failed to finalize writer for ssrc {}: {}", ssrc, e);
+        let _ = sqlx::query(
+            "INSERT INTO voice_events_audit (guild_id, user_id, ssrc, event_type_id, details) VALUES ($1, $2, $3, $4, $5)"
+        )
+        .bind(inner.guild_id.get() as i64)
+        .bind(rec.user_id as i64)
+        .bind(ssrc as i64)
+        .bind(VoiceEventType::WriterError as i32)
+        .bind(format!("finish: {}", e))
+        .execute(&inner.pool)
+        .await;
+    }
+
+    inner.metrics.active_recordings.fetch_sub(1, Ordering::Relaxed);
+    inner
+        .guild_metrics
+        .active_recordings
+        .fetch_sub(1, Ordering::Relaxed);
+
+    let time_elapsed = chrono::Utc::now()
+        .signed_duration_since(rec.start_time)
+        .num_milliseconds();
+    let last_person_in_channel = inner.user_id_hashmap.read().await.is_empty();
+    // 2 = JOINED 3 = LAST
+    let state = if last_person_in_channel { 3 } else { 2 };
+
+    let file_name = rec.file_name.clone();
+    let user_id = rec.user_id;
+    let rec_ssrc = rec.ssrc;
+    drop(rec);
+
+    info!("File name: {}", file_name);
+    if let Err(err) = sqlx::query!(
+        "UPDATE audio_files
+            SET end_ts = audio_files.start_ts + $1, state_leave = $2
+            WHERE file_name = $3",
+        time_elapsed,
+        state,
+        file_name
+    )
+    .execute(&inner.pool)
+    .await
+    {
+        error!("{}", err);
+        inner
+            .metrics
+            .db_query_errors
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    let _ = sqlx::query(
+        "INSERT INTO voice_events_audit (guild_id, user_id, ssrc, event_type_id, details) VALUES ($1, $2, $3, $4, $5)"
+    )
+    .bind(inner.guild_id.get() as i64)
+    .bind(user_id as i64)
+    .bind(rec_ssrc as i64)
+    .bind(event_type as i32)
+    .bind("Writer closed")
+    .execute(&inner.pool)
+    .await;
 }
 
 #[tracing::instrument(skip_all, name = "create_path")]
@@ -690,11 +579,11 @@ async fn create_path(
     _self: &Receiver,
     now: chrono::DateTime<chrono::Utc>,
     pool: &Pool<Postgres>,
-    ssrc: u32,
+    _ssrc: u32,
     guild_id: GuildId,
     channel_id: ChannelId,
     user_id: u64,
-    member: &serenity::model::guild::Member,
+    _member: &serenity::model::guild::Member,
     is_channel_empty: bool,
 ) -> String {
     let file_name = RecordingKey::stem_for(now.timestamp_millis(), user_id as i64);
@@ -709,15 +598,6 @@ async fn create_path(
     let dir_path = key.recording_dir(RECORDING_ROOT);
     let combined_path = key.recording_dir(RECORDING_ROOT).join(&file_name);
 
-    {
-        _self
-            .inner
-            .file_name
-            .write()
-            .await
-            .insert(ssrc, file_name.to_owned());
-    }
-
     if let Err(err) = std::fs::create_dir_all(&dir_path) {
         error!("cannot create path {}: {}", dir_path.display(), err);
     };
@@ -725,7 +605,7 @@ async fn create_path(
     let null: Option<i64> = None;
 
     match sqlx::query!(
-        "INSERT INTO audio_files 
+        "INSERT INTO audio_files
 	(file_name, guild_id, channel_id, user_id, year, month, start_ts, end_ts, state_enter) VALUES
 	($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         file_name,

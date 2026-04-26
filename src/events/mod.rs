@@ -11,3 +11,4 @@ pub mod reactions;
 pub mod roles;
 pub mod voice;
 pub mod voice_receiver;
+pub mod ogg_opus_writer;
