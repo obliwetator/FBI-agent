@@ -14,6 +14,7 @@ use crate::{
 };
 
 pub mod metrics;
+pub mod reaper;
 pub use metrics::*;
 
 // use crate::http::hello;
@@ -89,6 +90,8 @@ async fn main() {
         .connect(config::DB_URL)
         .await
         .expect("cannot connect to database");
+
+    reaper::reap_zombie_recordings(&pool).await;
 
     // let a = conn.exec_map("SELECT * FROM guilds WHERE id IN (:id)", db_param, | id | DBGuild { id });
     // Configure the client with your Discord bot token in the environment.
