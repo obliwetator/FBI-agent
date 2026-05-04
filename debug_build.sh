@@ -1,3 +1,3 @@
 #! /bin/bash
 
-cargo build && sudo systemctl restart fbi-agent-debug.service 
+cargo build && systemctl --user restart fbi-agent-debug.service
