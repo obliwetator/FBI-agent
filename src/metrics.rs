@@ -80,213 +80,78 @@ impl BotMetrics {
     pub fn register_otel_metrics(metrics: Arc<Self>) {
         let meter = opentelemetry::global::meter(crate::config::SERVICE_NAME);
 
-        let m1 = metrics.clone();
-        meter
-            .u64_observable_gauge("process_rss_bytes")
-            .with_description("RSS memory usage in bytes")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m1.process_rss_bytes
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    &[],
-                );
-            })
-            .build();
-
-        let m4_guild = metrics.clone();
-        meter
-            .u64_observable_gauge("guild_active_recordings")
-            .with_description("Number of active recordings per guild")
-            .with_callback(move |observer| {
-                for entry in m4_guild.guild_recording_metrics.iter() {
-                    let guild_id = entry.key();
-                    let guild_metrics = entry.value();
-                    observer.observe(
-                        guild_metrics
-                            .active_recordings
-                            .load(std::sync::atomic::Ordering::Relaxed)
-                            as u64,
-                        &[opentelemetry::KeyValue::new(
-                            "guild_id",
-                            guild_id.to_string(),
-                        )],
-                    );
+        // ── simple gauges (atomic → u64) ──
+        macro_rules! gauge {
+            ($name:literal, $desc:literal, $field:ident) => {
+                gauge!($name, $desc, $field, |v| v as u64);
+            };
+            ($name:literal, $desc:literal, $field:ident, $map:expr) => {
+                {
+                    let m = metrics.clone();
+                    meter
+                        .u64_observable_gauge($name)
+                        .with_description($desc)
+                        .with_callback(move |observer| {
+                            observer.observe(
+                                $map(
+                                    m.$field
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                ),
+                                &[],
+                            );
+                        })
+                        .build();
                 }
-            })
-            .build();
+            };
+        }
 
-        let m_crash_guild = metrics.clone();
-        meter
-            .u64_observable_gauge("guild_ffmpeg_process_crashes")
-            .with_description("Number of ffmpeg process crashes per guild")
-            .with_callback(move |observer| {
-                for entry in m_crash_guild.guild_recording_metrics.iter() {
-                    let guild_id = entry.key();
-                    let guild_metrics = entry.value();
-                    observer.observe(
-                        guild_metrics
-                            .ffmpeg_process_crashes
-                            .load(std::sync::atomic::Ordering::Relaxed)
-                            as u64,
-                        &[opentelemetry::KeyValue::new(
-                            "guild_id",
-                            guild_id.to_string(),
-                        )],
-                    );
+        // ── per-guild gauges (GuildRecordingMetrics field → u64) ──
+        macro_rules! guild_gauge {
+            ($name:literal, $desc:literal, $field:ident) => {
+                guild_gauge!($name, $desc, $field, |v| v as u64);
+            };
+            ($name:literal, $desc:literal, $field:ident, $map:expr) => {
+                {
+                    let m = metrics.clone();
+                    meter
+                        .u64_observable_gauge($name)
+                        .with_description($desc)
+                        .with_callback(move |observer| {
+                            for entry in m.guild_recording_metrics.iter() {
+                                let guild_id = entry.key();
+                                let guild_metrics = entry.value();
+                                observer.observe(
+                                    $map(
+                                        guild_metrics
+                                            .$field
+                                            .load(std::sync::atomic::Ordering::Relaxed),
+                                    ),
+                                    &[opentelemetry::KeyValue::new(
+                                        "guild_id",
+                                        guild_id.to_string(),
+                                    )],
+                                );
+                            }
+                        })
+                        .build();
                 }
-            })
-            .build();
+            };
+        }
 
-        let m2 = metrics.clone();
-        meter
-            .u64_observable_gauge("commands_executed")
-            .with_description("Total commands executed")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m2.commands_executed
-                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
-                    &[],
-                );
-            })
-            .build();
-
-        let m3 = metrics.clone();
-        meter
-            .u64_observable_gauge("active_voice_connections")
-            .with_description("Number of active voice connections")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m3.active_voice_connections
-                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
-                    &[],
-                );
-            })
-            .build();
-
-        let m4 = metrics.clone();
-        meter
-            .u64_observable_gauge("active_recordings")
-            .with_description("Number of active recordings")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m4.active_recordings
-                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
-                    &[],
-                );
-            })
-            .build();
-
-        let m5 = metrics.clone();
-        meter
-            .u64_observable_gauge("audio_packets_received")
-            .with_description("Total audio packets received")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m5.audio_packets_received
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    &[],
-                );
-            })
-            .build();
-
-        let m6 = metrics.clone();
-        meter
-            .u64_observable_gauge("tokio_active_tasks")
-            .with_description("Tokio runtime active tasks")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m6.tokio_active_tasks
-                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
-                    &[],
-                );
-            })
-            .build();
-
-        let m7 = metrics.clone();
-        meter
-            .u64_observable_gauge("audio_packets_dropped")
-            .with_description("Total audio packets dropped globally")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m7.audio_packets_dropped
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    &[],
-                );
-            })
-            .build();
-
-        let m8 = metrics.clone();
-        meter
-            .u64_observable_gauge("guild_audio_packets_dropped")
-            .with_description("Number of audio packets dropped per guild")
-            .with_callback(move |observer| {
-                for entry in m8.guild_recording_metrics.iter() {
-                    let guild_id = entry.key();
-                    let guild_metrics = entry.value();
-                    observer.observe(
-                        guild_metrics
-                            .audio_packets_dropped
-                            .load(std::sync::atomic::Ordering::Relaxed),
-                        &[opentelemetry::KeyValue::new(
-                            "guild_id",
-                            guild_id.to_string(),
-                        )],
-                    );
-                }
-            })
-            .build();
-
-        let m9 = metrics.clone();
-        meter
-            .u64_observable_gauge("gateway_reconnects")
-            .with_description("Total Discord gateway reconnects")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m9.gateway_reconnects
-                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
-                    &[],
-                );
-            })
-            .build();
-
-        let m10 = metrics.clone();
-        meter
-            .u64_observable_gauge("gateway_disconnects")
-            .with_description("Total Discord gateway disconnects")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m10.gateway_disconnects
-                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
-                    &[],
-                );
-            })
-            .build();
-
-        let m11 = metrics.clone();
-        meter
-            .u64_observable_gauge("driver_reconnects")
-            .with_description("Total Songbird driver reconnects")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m11.driver_reconnects
-                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
-                    &[],
-                );
-            })
-            .build();
-
-        let m12 = metrics.clone();
-        meter
-            .u64_observable_gauge("driver_disconnects")
-            .with_description("Total Songbird driver disconnects")
-            .with_callback(move |observer| {
-                observer.observe(
-                    m12.driver_disconnects
-                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
-                    &[],
-                );
-            })
-            .build();
+        gauge!("process_rss_bytes", "RSS memory usage in bytes", process_rss_bytes, std::convert::identity);
+        guild_gauge!("guild_active_recordings", "Number of active recordings per guild", active_recordings);
+        guild_gauge!("guild_ffmpeg_process_crashes", "Number of ffmpeg process crashes per guild", ffmpeg_process_crashes);
+        gauge!("commands_executed", "Total commands executed", commands_executed);
+        gauge!("active_voice_connections", "Number of active voice connections", active_voice_connections);
+        gauge!("active_recordings", "Number of active recordings", active_recordings);
+        gauge!("audio_packets_received", "Total audio packets received", audio_packets_received, std::convert::identity);
+        gauge!("tokio_active_tasks", "Tokio runtime active tasks", tokio_active_tasks);
+        gauge!("audio_packets_dropped", "Total audio packets dropped globally", audio_packets_dropped, std::convert::identity);
+        guild_gauge!("guild_audio_packets_dropped", "Number of audio packets dropped per guild", audio_packets_dropped, std::convert::identity);
+        gauge!("gateway_reconnects", "Total Discord gateway reconnects", gateway_reconnects);
+        gauge!("gateway_disconnects", "Total Discord gateway disconnects", gateway_disconnects);
+        gauge!("driver_reconnects", "Total Songbird driver reconnects", driver_reconnects);
+        gauge!("driver_disconnects", "Total Songbird driver disconnects", driver_disconnects);
     }
 
     /// Starts a background task to monitor process health (memory, FDs, active tasks).
