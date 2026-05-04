@@ -63,8 +63,6 @@ async fn main() {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    // install global collector configured based on RUST_LOG env var.
-    unsafe { env::set_var("RUST_BACKTRACE", "1") };
 
     crate::telemetry::init_telemetry();
 
