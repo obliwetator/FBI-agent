@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use serenity::{
     client::Context,
     model::channel::{Message, MessageType},
@@ -11,14 +9,14 @@ use crate::event_handler::Handler;
 pub async fn message(_self: &Handler, ctx: Context, msg: Message) {
     // let pool = db_helper::get_pool_from_ctx(&ctx).await;
     // db_helper::get_channels(&pool).await;
-
-    let now = Instant::now();
     // info!("message is {}", msg.content);
     match msg.kind {
         MessageType::Regular => {
             let data_read = ctx.data.read().await;
             if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
-                metrics.messages_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .messages_received
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let _ = metrics.update_tx.send(());
             }
         }

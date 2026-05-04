@@ -1,5 +1,3 @@
-// use std::env;
-#![allow(unused_variables)]
 use std::{collections::HashMap, env, sync::Arc};
 
 use serenity::{all::ApplicationId, client::Cache, http::Http, prelude::*};
@@ -17,8 +15,6 @@ pub mod metrics;
 pub mod reaper;
 pub use metrics::*;
 
-// use crate::http::hello;
-
 pub mod commands;
 pub mod config;
 pub mod cooldown;
@@ -26,7 +22,6 @@ mod database;
 pub mod event_handler;
 pub mod events;
 pub mod grpc;
-pub mod http;
 pub mod telemetry;
 
 #[cfg(test)]
@@ -152,7 +147,7 @@ async fn main() {
             .expect("BotMetrics not inserted")
     };
 
-    let one = tokio::spawn(async move {
+    let bot = tokio::spawn(async move {
         client.start().await.unwrap();
     });
 
@@ -162,7 +157,7 @@ async fn main() {
     // Register OpenTelemetry metrics.
     BotMetrics::register_otel_metrics(process_metrics);
 
-    let three = tokio::spawn(async move {
+    let grpc_server = tokio::spawn(async move {
         #[cfg(debug_assertions)]
         let addr = "[::1]:50053".parse().unwrap();
         #[cfg(not(debug_assertions))]
@@ -179,5 +174,5 @@ async fn main() {
             .await
     });
 
-    let (first, third) = tokio::join!(one, three);
+    let (_, _) = tokio::join!(bot, grpc_server);
 }

@@ -15,7 +15,7 @@ pub async fn play_clip(
     user_id: i64,
 ) -> Result<String, String> {
     let row = sqlx::query!(
-        "SELECT saved_file_name, name FROM clips WHERE guild_id = $1 AND clip_id = $2",
+        "SELECT saved_file_name, name FROM clips WHERE guild_id = $1 AND clip_id = $2 AND deleted_at IS NULL",
         guild_id.get() as i64,
         clip_id
     )

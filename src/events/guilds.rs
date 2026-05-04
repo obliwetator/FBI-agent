@@ -23,8 +23,8 @@ pub async fn guild_ban_removal(
 pub async fn guild_create(
     _self: &Handler,
     _ctx: Context,
-    guild: serenity::model::guild::Guild,
-    is_new: Option<bool>,
+    _guild: serenity::model::guild::Guild,
+    _is_new: Option<bool>,
 ) {
     // info!("guild data : {:?}", is_new);
     // database::guilds::sync_guilds(guild, is_new).await;

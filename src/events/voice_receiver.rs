@@ -7,9 +7,9 @@ use serenity::{
 };
 use songbird::{
     Event, EventContext, EventHandler as VoiceEventHandler,
-    packet::{Packet, PacketSize, rtp::RtpExtensionPacket},
     events::context_data::{ConnectData, DisconnectData},
     model::payload::{ClientDisconnect, Speaking},
+    packet::{Packet, PacketSize, rtp::RtpExtensionPacket},
 };
 use sqlx::{Pool, Postgres};
 use std::collections::{HashMap, HashSet};
@@ -24,9 +24,6 @@ use crate::events::ogg_opus_writer::OggOpusWriter;
 
 pub const RECORDING_FILE_PATH: &str = RECORDING_ROOT;
 pub const CLIPS_FILE_PATH: &str = CLIPS_ROOT;
-
-/// 20 ms of audio per Opus packet — matches Discord's tick rate.
-const TICK_MS: i64 = 20;
 
 #[repr(i32)]
 pub enum VoiceEventType {
@@ -238,17 +235,6 @@ impl VoiceEventHandler for Receiver {
                             let now = chrono::Utc::now();
                             let now_ms = now.timestamp_millis();
 
-                            // Anchor session start on first joiner; reuse for later joiners.
-                            let session_start = match self.inner.session_start_ms.compare_exchange(
-                                0,
-                                now_ms,
-                                Ordering::SeqCst,
-                                Ordering::SeqCst,
-                            ) {
-                                Ok(_) => now_ms,
-                                Err(existing) => existing,
-                            };
-
                             let path = create_path(
                                 self,
                                 now,
@@ -278,26 +264,13 @@ impl VoiceEventHandler for Receiver {
                                 }
                             };
 
-                            let mut writer = match OggOpusWriter::new(BufWriter::new(file), *ssrc, 0) {
+                            let writer = match OggOpusWriter::new(BufWriter::new(file), *ssrc, 0) {
                                 Ok(w) => w,
                                 Err(e) => {
                                     error!("Failed to init OggOpusWriter for ssrc {}: {}", ssrc, e);
                                     return None;
                                 }
                             };
-
-                            // Pad with leading silence so this file's granule-zero aligns
-                            // with session-start. First joiner: session_start == now_ms → 0 frames.
-                            let lead_ms = now_ms.saturating_sub(session_start);
-                            let lead_frames = (lead_ms / TICK_MS) as u64;
-                            if lead_frames > 0 {
-                                if let Err(e) = writer.write_silence(lead_frames) {
-                                    error!(
-                                        "Failed to write {} leading silence frames for ssrc {}: {}",
-                                        lead_frames, ssrc, e
-                                    );
-                                }
-                            }
 
                             let file_name = RecordingKey::stem_for(now_ms, user_id.0 as i64);
                             let recording = UserRecording {
@@ -389,7 +362,11 @@ impl VoiceEventHandler for Receiver {
                                 match RtpExtensionPacket::new(body) {
                                     Some(ext) => {
                                         let off = ext.packet_size();
-                                        if off >= body.len() { &[][..] } else { &body[off..] }
+                                        if off >= body.len() {
+                                            &[][..]
+                                        } else {
+                                            &body[off..]
+                                        }
                                     }
                                     None => body,
                                 }
@@ -496,11 +473,7 @@ impl VoiceEventHandler for Receiver {
 
 /// Close the writer for `ssrc`, run the audio_files DB update, decrement
 /// active counters. Idempotent — silently no-ops if the writer is already gone.
-async fn finalize_writer(
-    inner: &Arc<InnerReceiver>,
-    ssrc: u32,
-    event_type: VoiceEventType,
-) {
+async fn finalize_writer(inner: &Arc<InnerReceiver>, ssrc: u32, event_type: VoiceEventType) {
     let entry = inner.ssrc_writer_hashmap.write().await.remove(&ssrc);
     let Some(arc) = entry else {
         return;
@@ -525,7 +498,10 @@ async fn finalize_writer(
         .await;
     }
 
-    inner.metrics.active_recordings.fetch_sub(1, Ordering::Relaxed);
+    inner
+        .metrics
+        .active_recordings
+        .fetch_sub(1, Ordering::Relaxed);
     inner
         .guild_metrics
         .active_recordings

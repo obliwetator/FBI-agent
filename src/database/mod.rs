@@ -48,7 +48,7 @@ async fn update_roles(guild_cached: &Vec<Guild>, handler: &Handler) {
 
         let query = query_builder.build();
 
-        let res = query.execute(&handler.database).await.unwrap();
+        query.execute(&handler.database).await.unwrap();
     }
 }
 
@@ -68,7 +68,7 @@ async fn update_user_roles(guild_cached: &Vec<Guild>, handler: &Handler) {
                     .push(" ON CONFLICT (user_id, role_id) DO UPDATE SET role_id=EXCLUDED.role_id");
 
                 let query = query_builder.build();
-                let res = query.execute(&handler.database).await.unwrap();
+                query.execute(&handler.database).await.unwrap();
             }
         }
     }
@@ -78,7 +78,7 @@ async fn update_permissions(guild_cached: &Vec<Guild>, handler: &Handler) {
     for guild in guild_cached {
         let ch = &guild.channels;
 
-        for (ch_id, channel) in ch {
+        for (_ch_id, channel) in ch {
             let mut query_builder: sqlx::QueryBuilder<Postgres> = sqlx::QueryBuilder::new(
                 "INSERT INTO channel_permissions (channel_id, target_id, kind, allow, deny) ",
             );
@@ -114,7 +114,7 @@ async fn update_permissions(guild_cached: &Vec<Guild>, handler: &Handler) {
 
                 let query = query_builder.build();
 
-                let res = query.execute(&handler.database).await.unwrap();
+                query.execute(&handler.database).await.unwrap();
             }
         }
 
@@ -138,7 +138,7 @@ async fn update_guilds(guild_cached: &Vec<Guild>, handler: &Handler) {
 
     let query = query_builder.build();
 
-    let res = query.execute(&handler.database).await.unwrap();
+    query.execute(&handler.database).await.unwrap();
 }
 
 async fn update_channels(guild_cached: &Vec<Guild>, handler: &Handler) {
@@ -160,7 +160,7 @@ async fn update_channels(guild_cached: &Vec<Guild>, handler: &Handler) {
 
         let query = query_builder.build();
 
-        let res = query.execute(&handler.database).await.unwrap();
+        query.execute(&handler.database).await.unwrap();
     }
 }
 
@@ -171,13 +171,11 @@ pub async fn update_guild_present(guilds: Vec<UnavailableGuild>, handler: &Handl
 
     query_builder
         .push_values(guilds.into_iter().take(BIND_LIMIT), |mut b, guild| {
-            let value = guild.id.get();
-
             b.push_bind(guild.id.get() as i64);
         })
         .push(" ON CONFLICT (guild_id) DO NOTHING");
 
     let query = query_builder.build();
 
-    let res = query.execute(&handler.database).await.unwrap();
+    query.execute(&handler.database).await.unwrap();
 }

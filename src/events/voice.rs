@@ -367,7 +367,7 @@ async fn join_ch(
     guild_id: GuildId,
     channel_id: ChannelId,
     ctx: &Context,
-    user_id: u64,
+    _user_id: u64,
     old_channel: Option<u64>,
 ) {
     let result_handler_lock = manager.join(guild_id, channel_id).await;
@@ -375,7 +375,7 @@ async fn join_ch(
         Ok(handler_lock) => {
             info!("Joined {}", channel_id);
 
-            if let Some(old_ch) = old_channel {
+            if old_channel.is_some() {
                 // switching channels. Don't re-register. Cleanup
                 info!("Clean up switching chanels");
             } else {

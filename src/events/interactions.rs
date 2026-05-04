@@ -10,8 +10,6 @@ use tracing::{info, warn};
 
 use crate::event_handler::Handler;
 
-use super::voice_receiver::RECORDING_FILE_PATH;
-
 pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Interaction) {
     match interaction {
         Interaction::Ping(_) => {
@@ -22,10 +20,6 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
 
             match application_command.data.name.as_str() {
                 "help" => response_msg = response_msg.content(":("),
-                "play" => {
-                    response_msg =
-                        response_msg.content(handle_play_audio(&application_command, &ctx, "").await)
-                }
                 "jam" => {
                     let (content, clip_id) = handle_jam(
                         &application_command,
@@ -44,13 +38,16 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                     }
                 }
                 "queue" => {
-                    response_msg = response_msg.content(handle_queue(&application_command, &ctx).await)
+                    response_msg =
+                        response_msg.content(handle_queue(&application_command, &ctx).await)
                 }
                 "skip" => {
-                    response_msg = response_msg.content(handle_skip(&application_command, &ctx).await)
+                    response_msg =
+                        response_msg.content(handle_skip(&application_command, &ctx).await)
                 }
                 "stop" => {
-                    response_msg = response_msg.content(handle_stop(&application_command, &ctx).await)
+                    response_msg =
+                        response_msg.content(handle_stop(&application_command, &ctx).await)
                 }
                 "stamp" => {
                     response_msg = response_msg.content(
@@ -63,8 +60,10 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                     )
                 }
                 other => {
-                    response_msg = response_msg
-                        .content(format!("Unknown application_command with the name {}", other))
+                    response_msg = response_msg.content(format!(
+                        "Unknown application_command with the name {}",
+                        other
+                    ))
                 }
             }
 
@@ -167,7 +166,7 @@ async fn get_clip_choices(
     );
 
     let rows = sqlx::query!(
-        "SELECT name, clip_id FROM clips WHERE guild_id = $1 AND name ILIKE $2 LIMIT 25",
+        "SELECT name, clip_id FROM clips WHERE guild_id = $1 AND name ILIKE $2 AND deleted_at IS NULL LIMIT 25",
         guild_id,
         query_wildcard
     )
@@ -249,7 +248,9 @@ async fn handle_jam(
         clip_name, guild_id
     );
 
-    match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, &clip_name, user_id).await {
+    match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, &clip_name, user_id)
+        .await
+    {
         Ok(msg) => {
             info!("Successfully played clip: {}", msg);
             (msg, Some(clip_name))
@@ -289,7 +290,9 @@ async fn replay_clip(
         }
     }
 
-    match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, clip_id, user_id).await {
+    match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, clip_id, user_id)
+        .await
+    {
         Ok(msg) => msg,
         Err(e) => e,
     }
@@ -335,39 +338,4 @@ async fn handle_stop(application_command: &CommandInteraction, ctx: &Context) ->
     };
 
     crate::commands::voice_controls::stop(&manager, guild_id).await
-}
-
-pub async fn handle_play_audio(
-    application_command: &CommandInteraction,
-    ctx: &Context,
-    file_name: &str,
-) -> String {
-    let manager = match songbird::get(ctx).await {
-        Some(m) => m,
-        None => return "Voice system is not configured.".to_string(),
-    };
-
-    let guild_id = match application_command.guild_id {
-        Some(id) => id,
-        None => return "This command can only be used in a server.".to_string(),
-    };
-
-    // TODO: This does not return and error if the wrong file path is given?
-    let result = songbird::input::File::new(format!(
-        "{}{}",
-        RECORDING_FILE_PATH,
-        "/362257054829641758/2022/December/1670620473631-161172393719496704-QazZ.ogg"
-    ));
-
-    let input = songbird::input::Input::from(result);
-
-    let handler = match manager.get(guild_id) {
-        Some(h) => h,
-        None => return "I am not currently in a voice channel.".to_string(),
-    };
-
-    let handler_lock = handler.lock().await.enqueue(input.into()).await;
-    let _ = handler_lock.set_volume(0.5);
-
-    "jamming".to_string()
 }
