@@ -11,12 +11,7 @@ enum UserNameEventType {
 
 /// Record the latest observed names for a user. Each differing value also
 /// appends a row to user_name_history so renames stay traceable.
-pub async fn observe(
-    pool: &Pool<Postgres>,
-    guild_id: u64,
-    user: &User,
-    member: Option<&Member>,
-) {
+pub async fn observe(pool: &Pool<Postgres>, guild_id: u64, user: &User, member: Option<&Member>) {
     let user_id = user.id.get() as i64;
     let guild_id_i = guild_id as i64;
     let username = user.name.clone();
@@ -43,7 +38,14 @@ pub async fn observe(
                 warn!("user_names initial insert failed for {}: {}", user_id, e);
             }
 
-            push_history(pool, user_id, None, UserNameEventType::Username, Some(&username)).await;
+            push_history(
+                pool,
+                user_id,
+                None,
+                UserNameEventType::Username,
+                Some(&username),
+            )
+            .await;
             if let Some(ref gn) = global_name {
                 push_history(pool, user_id, None, UserNameEventType::GlobalName, Some(gn)).await;
             }
@@ -67,7 +69,14 @@ pub async fn observe(
                 }
 
                 if username_changed {
-                    push_history(pool, user_id, None, UserNameEventType::Username, Some(&username)).await;
+                    push_history(
+                        pool,
+                        user_id,
+                        None,
+                        UserNameEventType::Username,
+                        Some(&username),
+                    )
+                    .await;
                 }
                 if global_changed {
                     push_history(

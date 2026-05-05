@@ -108,10 +108,10 @@ pub async fn reap_zombie_recordings(pool: &Pool<Postgres>) {
                 }
             }
             let hls = key.live_dir(RECORDING_ROOT);
-            if hls.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&hls) {
-                    warn!(path = %hls.display(), error = %e, "reaper: hls cleanup failed");
-                }
+            if hls.exists()
+                && let Err(e) = std::fs::remove_dir_all(&hls)
+            {
+                warn!(path = %hls.display(), error = %e, "reaper: hls cleanup failed");
             }
         }
     }

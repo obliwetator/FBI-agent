@@ -85,24 +85,19 @@ impl BotMetrics {
             ($name:literal, $desc:literal, $field:ident) => {
                 gauge!($name, $desc, $field, |v| v as u64);
             };
-            ($name:literal, $desc:literal, $field:ident, $map:expr) => {
-                {
-                    let m = metrics.clone();
-                    meter
-                        .u64_observable_gauge($name)
-                        .with_description($desc)
-                        .with_callback(move |observer| {
-                            observer.observe(
-                                $map(
-                                    m.$field
-                                        .load(std::sync::atomic::Ordering::Relaxed),
-                                ),
-                                &[],
-                            );
-                        })
-                        .build();
-                }
-            };
+            ($name:literal, $desc:literal, $field:ident, $map:expr) => {{
+                let m = metrics.clone();
+                meter
+                    .u64_observable_gauge($name)
+                    .with_description($desc)
+                    .with_callback(move |observer| {
+                        observer.observe(
+                            $map(m.$field.load(std::sync::atomic::Ordering::Relaxed)),
+                            &[],
+                        );
+                    })
+                    .build();
+            }};
         }
 
         // ── per-guild gauges (GuildRecordingMetrics field → u64) ──
@@ -110,48 +105,106 @@ impl BotMetrics {
             ($name:literal, $desc:literal, $field:ident) => {
                 guild_gauge!($name, $desc, $field, |v| v as u64);
             };
-            ($name:literal, $desc:literal, $field:ident, $map:expr) => {
-                {
-                    let m = metrics.clone();
-                    meter
-                        .u64_observable_gauge($name)
-                        .with_description($desc)
-                        .with_callback(move |observer| {
-                            for entry in m.guild_recording_metrics.iter() {
-                                let guild_id = entry.key();
-                                let guild_metrics = entry.value();
-                                observer.observe(
-                                    $map(
-                                        guild_metrics
-                                            .$field
-                                            .load(std::sync::atomic::Ordering::Relaxed),
-                                    ),
-                                    &[opentelemetry::KeyValue::new(
-                                        "guild_id",
-                                        guild_id.to_string(),
-                                    )],
-                                );
-                            }
-                        })
-                        .build();
-                }
-            };
+            ($name:literal, $desc:literal, $field:ident, $map:expr) => {{
+                let m = metrics.clone();
+                meter
+                    .u64_observable_gauge($name)
+                    .with_description($desc)
+                    .with_callback(move |observer| {
+                        for entry in m.guild_recording_metrics.iter() {
+                            let guild_id = entry.key();
+                            let guild_metrics = entry.value();
+                            observer.observe(
+                                $map(
+                                    guild_metrics
+                                        .$field
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                ),
+                                &[opentelemetry::KeyValue::new(
+                                    "guild_id",
+                                    guild_id.to_string(),
+                                )],
+                            );
+                        }
+                    })
+                    .build();
+            }};
         }
 
-        gauge!("process_rss_bytes", "RSS memory usage in bytes", process_rss_bytes, std::convert::identity);
-        guild_gauge!("guild_active_recordings", "Number of active recordings per guild", active_recordings);
-        guild_gauge!("guild_ffmpeg_process_crashes", "Number of ffmpeg process crashes per guild", ffmpeg_process_crashes);
-        gauge!("commands_executed", "Total commands executed", commands_executed);
-        gauge!("active_voice_connections", "Number of active voice connections", active_voice_connections);
-        gauge!("active_recordings", "Number of active recordings", active_recordings);
-        gauge!("audio_packets_received", "Total audio packets received", audio_packets_received, std::convert::identity);
-        gauge!("tokio_active_tasks", "Tokio runtime active tasks", tokio_active_tasks);
-        gauge!("audio_packets_dropped", "Total audio packets dropped globally", audio_packets_dropped, std::convert::identity);
-        guild_gauge!("guild_audio_packets_dropped", "Number of audio packets dropped per guild", audio_packets_dropped, std::convert::identity);
-        gauge!("gateway_reconnects", "Total Discord gateway reconnects", gateway_reconnects);
-        gauge!("gateway_disconnects", "Total Discord gateway disconnects", gateway_disconnects);
-        gauge!("driver_reconnects", "Total Songbird driver reconnects", driver_reconnects);
-        gauge!("driver_disconnects", "Total Songbird driver disconnects", driver_disconnects);
+        gauge!(
+            "process_rss_bytes",
+            "RSS memory usage in bytes",
+            process_rss_bytes,
+            std::convert::identity
+        );
+        guild_gauge!(
+            "guild_active_recordings",
+            "Number of active recordings per guild",
+            active_recordings
+        );
+        guild_gauge!(
+            "guild_ffmpeg_process_crashes",
+            "Number of ffmpeg process crashes per guild",
+            ffmpeg_process_crashes
+        );
+        gauge!(
+            "commands_executed",
+            "Total commands executed",
+            commands_executed
+        );
+        gauge!(
+            "active_voice_connections",
+            "Number of active voice connections",
+            active_voice_connections
+        );
+        gauge!(
+            "active_recordings",
+            "Number of active recordings",
+            active_recordings
+        );
+        gauge!(
+            "audio_packets_received",
+            "Total audio packets received",
+            audio_packets_received,
+            std::convert::identity
+        );
+        gauge!(
+            "tokio_active_tasks",
+            "Tokio runtime active tasks",
+            tokio_active_tasks
+        );
+        gauge!(
+            "audio_packets_dropped",
+            "Total audio packets dropped globally",
+            audio_packets_dropped,
+            std::convert::identity
+        );
+        guild_gauge!(
+            "guild_audio_packets_dropped",
+            "Number of audio packets dropped per guild",
+            audio_packets_dropped,
+            std::convert::identity
+        );
+        gauge!(
+            "gateway_reconnects",
+            "Total Discord gateway reconnects",
+            gateway_reconnects
+        );
+        gauge!(
+            "gateway_disconnects",
+            "Total Discord gateway disconnects",
+            gateway_disconnects
+        );
+        gauge!(
+            "driver_reconnects",
+            "Total Songbird driver reconnects",
+            driver_reconnects
+        );
+        gauge!(
+            "driver_disconnects",
+            "Total Songbird driver disconnects",
+            driver_disconnects
+        );
     }
 
     /// Starts a background task to monitor process health (memory, FDs, active tasks).

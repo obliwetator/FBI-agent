@@ -8,85 +8,92 @@ use serenity::{
     prelude::Context,
 };
 use sqlx::Postgres;
+use tracing::error;
 
 const BIND_LIMIT: usize = 65535;
 
-pub(crate) async fn update_info(handler: &Handler, ctx: &Context, guilds: &Vec<GuildId>) {
-    let guild_cached = &guilds
+pub(crate) async fn update_info(handler: &Handler, ctx: &Context, guilds: &[GuildId]) {
+    let guild_cached: Vec<Guild> = guilds
         .iter()
-        .map(|guild| {
-            let x = guild.to_guild_cached(&ctx).unwrap().to_owned();
-            x
+        .filter_map(|guild| {
+            guild
+                .to_guild_cached(ctx)
+                .map(|g| g.to_owned())
+                .or_else(|| {
+                    error!("Guild {} missing from cache during database update", guild);
+                    None
+                })
         })
         .collect();
 
-    update_guilds(guild_cached, handler).await;
-    update_roles(guild_cached, handler).await;
+    update_guilds(&guild_cached, handler).await;
+    update_roles(&guild_cached, handler).await;
 
     // TODO: Remove roles that are not present
     // TODO: Remove roles that are not present while the bot is running
-    update_user_roles(guild_cached, handler).await;
-    update_channels(guild_cached, handler).await;
-    update_permissions(guild_cached, handler).await;
+    update_user_roles(&guild_cached, handler).await;
+    update_channels(&guild_cached, handler).await;
+    update_permissions(&guild_cached, handler).await;
 }
 
-async fn update_roles(guild_cached: &Vec<Guild>, handler: &Handler) {
+async fn update_roles(guild_cached: &[Guild], handler: &Handler) {
     for guild in guild_cached {
         let mut query_builder: sqlx::QueryBuilder<Postgres> =
             sqlx::QueryBuilder::new("INSERT INTO roles (guild_id, role_id, permission, name) ");
         query_builder
-            .push_values(
-                (&guild.roles).into_iter().take(BIND_LIMIT / 4),
-                |mut b, role| {
-                    b.push_bind(role.1.guild_id.get() as i64)
-                        .push_bind(role.0.get() as i64)
-                        .push_bind(role.1.permissions.bits() as i64)
-                        .push_bind(&role.1.name);
-                },
-            )
+            .push_values(guild.roles.iter().take(BIND_LIMIT / 4), |mut b, role| {
+                b.push_bind(role.1.guild_id.get() as i64)
+                    .push_bind(role.0.get() as i64)
+                    .push_bind(role.1.permissions.bits() as i64)
+                    .push_bind(&role.1.name);
+            })
             .push(" ON CONFLICT (role_id) DO UPDATE SET permission=EXCLUDED.permission");
 
         let query = query_builder.build();
 
-        query.execute(&handler.database).await.unwrap();
+        if let Err(err) = query.execute(&handler.database).await {
+            error!(guild_id = guild.id.get(), error = %err, "failed to update roles");
+        }
     }
 }
 
-async fn update_user_roles(guild_cached: &Vec<Guild>, handler: &Handler) {
+async fn update_user_roles(guild_cached: &[Guild], handler: &Handler) {
     for guild in guild_cached {
         for (user_id, user) in guild.members.iter() {
             let perm = &user.roles;
-            if perm.len() > 0 {
+            if !perm.is_empty() {
                 let mut query_builder: sqlx::QueryBuilder<Postgres> =
                     sqlx::QueryBuilder::new("INSERT INTO user_roles (user_id, role_id) ");
 
                 query_builder
-                    .push_values(perm.into_iter().take(BIND_LIMIT / 4), |mut b, role| {
+                    .push_values(perm.iter().take(BIND_LIMIT / 4), |mut b, role| {
                         b.push_bind(user_id.get() as i64)
                             .push_bind(role.get() as i64);
                     })
                     .push(" ON CONFLICT (user_id, role_id) DO UPDATE SET role_id=EXCLUDED.role_id");
 
                 let query = query_builder.build();
-                query.execute(&handler.database).await.unwrap();
+                if let Err(err) = query.execute(&handler.database).await {
+                    error!(guild_id = guild.id.get(), error = %err, "failed to update user roles");
+                }
             }
         }
     }
 }
 
-async fn update_permissions(guild_cached: &Vec<Guild>, handler: &Handler) {
+async fn update_permissions(guild_cached: &[Guild], handler: &Handler) {
     for guild in guild_cached {
         let ch = &guild.channels;
 
-        for (_ch_id, channel) in ch {
+        for channel in ch.values() {
             let mut query_builder: sqlx::QueryBuilder<Postgres> = sqlx::QueryBuilder::new(
                 "INSERT INTO channel_permissions (channel_id, target_id, kind, allow, deny) ",
             );
 
             let perm = &channel.permission_overwrites;
-            if perm.len() > 0 {
+            if !perm.is_empty() {
                 query_builder
-                        .push_values(perm.into_iter().take(BIND_LIMIT / 5), |mut b, p| {
+                        .push_values(perm.iter().take(BIND_LIMIT / 5), |mut b, p| {
                             let kind = {
                                 match p.kind {
                                     serenity::model::prelude::PermissionOverwriteType::Member(
@@ -96,7 +103,11 @@ async fn update_permissions(guild_cached: &Vec<Guild>, handler: &Handler) {
                                         ("role", channel.get() as i64)
                                     }
                                     _ => {
-                                        panic!("this should not happen")
+                                        error!(
+                                            channel_id = channel.id.get(),
+                                            "unknown permission overwrite type"
+                                        );
+                                        ("unknown", 0)
                                     }
                                 }
                             };
@@ -114,34 +125,33 @@ async fn update_permissions(guild_cached: &Vec<Guild>, handler: &Handler) {
 
                 let query = query_builder.build();
 
-                query.execute(&handler.database).await.unwrap();
+                if let Err(err) = query.execute(&handler.database).await {
+                    error!(guild_id = guild.id.get(), error = %err, "failed to update channel permissions");
+                }
             }
         }
-
-        // let res = query.execute(&handler.database).await.unwrap();
     }
 }
 
-async fn update_guilds(guild_cached: &Vec<Guild>, handler: &Handler) {
+async fn update_guilds(guild_cached: &[Guild], handler: &Handler) {
     let mut query_builder: sqlx::QueryBuilder<Postgres> =
         sqlx::QueryBuilder::new("INSERT INTO guilds (id, owner_id) ");
 
     query_builder
-        .push_values(
-            guild_cached.into_iter().take(BIND_LIMIT / 2),
-            |mut b, guild| {
-                b.push_bind(guild.id.get() as i64)
-                    .push_bind(guild.owner_id.get() as i64);
-            },
-        )
+        .push_values(guild_cached.iter().take(BIND_LIMIT / 2), |mut b, guild| {
+            b.push_bind(guild.id.get() as i64)
+                .push_bind(guild.owner_id.get() as i64);
+        })
         .push(" ON CONFLICT DO NOTHING ");
 
     let query = query_builder.build();
 
-    query.execute(&handler.database).await.unwrap();
+    if let Err(err) = query.execute(&handler.database).await {
+        error!(error = %err, "failed to update guilds");
+    }
 }
 
-async fn update_channels(guild_cached: &Vec<Guild>, handler: &Handler) {
+async fn update_channels(guild_cached: &[Guild], handler: &Handler) {
     // "INSERT INTO channel_permissions (channel_id, target_id, kind, allow, deny) ",
 
     for guild in guild_cached {
@@ -150,7 +160,7 @@ async fn update_channels(guild_cached: &Vec<Guild>, handler: &Handler) {
         let ch = &guild.channels;
 
         query_builder
-            .push_values(ch.into_iter().take(BIND_LIMIT / 4), |mut b, channel| {
+            .push_values(ch.iter().take(BIND_LIMIT / 4), |mut b, channel| {
                 b.push_bind(channel.1.id.get() as i64)
                     .push_bind(channel.1.guild_id.get() as i64)
                     .push_bind(u8::from(channel.1.kind) as i32)
@@ -160,7 +170,9 @@ async fn update_channels(guild_cached: &Vec<Guild>, handler: &Handler) {
 
         let query = query_builder.build();
 
-        query.execute(&handler.database).await.unwrap();
+        if let Err(err) = query.execute(&handler.database).await {
+            error!(guild_id = guild.id.get(), error = %err, "failed to update channels");
+        }
     }
 }
 
@@ -177,5 +189,7 @@ pub async fn update_guild_present(guilds: Vec<UnavailableGuild>, handler: &Handl
 
     let query = query_builder.build();
 
-    query.execute(&handler.database).await.unwrap();
+    if let Err(err) = query.execute(&handler.database).await {
+        error!(error = %err, "failed to update present guilds");
+    }
 }

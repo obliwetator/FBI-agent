@@ -20,7 +20,7 @@ use serenity::{
 };
 
 use sqlx::{Pool, Postgres};
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{database, events, get_lock_read};
 
@@ -54,9 +54,14 @@ impl EventHandler for Handler {
     async fn cache_ready(&self, ctx: Context, guilds: Vec<serenity::model::id::GuildId>) {
         let guild_cached: &Vec<Guild> = &guilds
             .iter()
-            .map(|guild| {
-                let x = guild.to_guild_cached(&ctx).unwrap().to_owned();
-                x
+            .filter_map(|guild| {
+                guild
+                    .to_guild_cached(&ctx)
+                    .map(|g| g.to_owned())
+                    .or_else(|| {
+                        error!("Guild {} missing from cache during cache_ready", guild);
+                        None
+                    })
             })
             .collect();
         let lock = get_lock_read(&ctx).await;

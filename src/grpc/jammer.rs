@@ -4,7 +4,7 @@ use serenity::model::prelude::GuildId;
 use serenity::prelude::{RwLock, TypeMap};
 use songbird::SongbirdKey;
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{error, info, warn};
 
 use crate::config::APPLICATION_ID_RELEASE;
 use crate::cooldown::CheckResult;
@@ -36,11 +36,15 @@ impl Jammer for MyJammer {
             }
         }
 
-        let guild = match self
-            .data_cache
-            .cache
-            .guild(GuildId::new(data.guild_id.try_into().unwrap()))
-        {
+        let guild_id = match u64::try_from(data.guild_id) {
+            Ok(id) => GuildId::new(id),
+            Err(_) => {
+                warn!("Invalid guild id from jam request: {}", data.guild_id);
+                return Err(Status::invalid_argument("guild_id must be non-negative"));
+            }
+        };
+
+        let guild = match self.data_cache.cache.guild(guild_id) {
             Some(g) => g.to_owned(),
             None => {
                 return Ok(Response::new(JamResponse {
@@ -50,11 +54,21 @@ impl Jammer for MyJammer {
             }
         };
 
-        for (_key, guild_channel) in &guild.channels {
+        for guild_channel in guild.channels.values() {
             if guild_channel.kind != serenity::model::prelude::ChannelType::Voice {
                 continue;
             }
-            let members = guild_channel.members(&self.data_cache.cache).unwrap();
+            let members = match guild_channel.members(&self.data_cache.cache) {
+                Ok(members) => members,
+                Err(err) => {
+                    warn!(
+                        channel_id = guild_channel.id.get(),
+                        error = %err,
+                        "failed to read channel members"
+                    );
+                    continue;
+                }
+            };
             for member in &members {
                 if member.user.id == APPLICATION_ID_RELEASE {
                     info!(
@@ -62,14 +76,21 @@ impl Jammer for MyJammer {
                         guild_channel.id.get()
                     );
 
-                    handle_play_audio_to_channel(
+                    if let Err(err) = handle_play_audio_to_channel(
                         data.guild_id,
                         &data.clip_name,
                         data.user_id,
                         self.data_cache.data.clone(),
                         self.data_cache.pool.clone(),
                     )
-                    .await;
+                    .await
+                    {
+                        error!("Failed to handle gRPC jam playback: {}", err);
+                        return Ok(Response::new(JamResponse {
+                            resp: JamResponseEnum::Unknown.into(),
+                            cooldown_remaining_seconds: 0,
+                        }));
+                    }
 
                     return Ok(Response::new(JamResponse {
                         resp: JamResponseEnum::Ok.into(),
@@ -92,17 +113,18 @@ async fn handle_play_audio_to_channel(
     user_id: i64,
     data: Arc<RwLock<TypeMap>>,
     pool: sqlx::Pool<sqlx::Postgres>,
-) {
+) -> Result<(), String> {
     let manager = {
         let data_guard = data.read().await;
-        data_guard.get::<SongbirdKey>().cloned().unwrap()
+        data_guard
+            .get::<SongbirdKey>()
+            .cloned()
+            .ok_or_else(|| "Songbird manager missing from typemap".to_string())?
     };
 
-    let guild_id = GuildId::new(id.try_into().unwrap());
-    if let Err(e) =
-        crate::commands::voice_controls::play_clip(&pool, &manager, guild_id, clip_name, user_id)
-            .await
-    {
-        tracing::error!("Failed to play clip from grpc: {}", e);
-    }
+    let guild_id =
+        GuildId::new(u64::try_from(id).map_err(|_| "guild_id must be non-negative".to_string())?);
+    crate::commands::voice_controls::play_clip(&pool, &manager, guild_id, clip_name, user_id)
+        .await
+        .map(|_| ())
 }

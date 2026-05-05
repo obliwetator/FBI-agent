@@ -6,7 +6,7 @@ use songbird::SongbirdKey;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::BotMetricsKey;
 
@@ -146,51 +146,52 @@ impl Dashboard for MyJammer {
                     if tx.send(Ok(event)).await.is_err() {
                         break;
                     }
-                } else if let Some(guild_id_str) = topic.strip_prefix("guild_voice:") {
-                    if let Ok(guild_id) = guild_id_str.parse::<u64>() {
-                        let mut voice_states_json = Vec::new();
-                        let mut user_start_times_json = serde_json::Map::new();
+                } else if let Some(guild_id_str) = topic.strip_prefix("guild_voice:")
+                    && let Ok(guild_id) = guild_id_str.parse::<u64>()
+                {
+                    let mut voice_states_json = Vec::new();
+                    let mut user_start_times_json = serde_json::Map::new();
 
-                        let (user_start_times, guild_rec_metrics) = {
-                            let data_guard = data_cache.data.read().await;
-                            if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
-                                (
-                                    Some(metrics.user_start_times.clone()),
-                                    Some(metrics.guild_metrics(guild_id)),
-                                )
-                            } else {
-                                (None, None)
-                            }
-                        };
+                    let (user_start_times, guild_rec_metrics) = {
+                        let data_guard = data_cache.data.read().await;
+                        if let Some(metrics) = data_guard.get::<BotMetricsKey>() {
+                            (
+                                Some(metrics.user_start_times.clone()),
+                                Some(metrics.guild_metrics(guild_id)),
+                            )
+                        } else {
+                            (None, None)
+                        }
+                    };
 
-                        if let Some(guild) = data_cache.cache.guild(GuildId::new(guild_id)) {
-                            for (user_id, voice_state) in &guild.voice_states {
-                                if let Some(channel_id) = voice_state.channel_id {
-                                    voice_states_json.push(serde_json::json!({
-                                        "user_id": user_id.get().to_string(),
-                                        "channel_id": channel_id.get().to_string(),
-                                        "mute": voice_state.mute,
-                                        "deaf": voice_state.deaf,
-                                        "self_mute": voice_state.self_mute,
-                                        "self_deaf": voice_state.self_deaf,
-                                        "self_stream": voice_state.self_stream.unwrap_or(false),
-                                        "self_video": voice_state.self_video,
-                                        "suppress": voice_state.suppress,
-                                    }));
+                    if let Some(guild) = data_cache.cache.guild(GuildId::new(guild_id)) {
+                        for (user_id, voice_state) in &guild.voice_states {
+                            if let Some(channel_id) = voice_state.channel_id {
+                                voice_states_json.push(serde_json::json!({
+                                    "user_id": user_id.get().to_string(),
+                                    "channel_id": channel_id.get().to_string(),
+                                    "mute": voice_state.mute,
+                                    "deaf": voice_state.deaf,
+                                    "self_mute": voice_state.self_mute,
+                                    "self_deaf": voice_state.self_deaf,
+                                    "self_stream": voice_state.self_stream.unwrap_or(false),
+                                    "self_video": voice_state.self_video,
+                                    "suppress": voice_state.suppress,
+                                }));
 
-                                    if let Some(times) = &user_start_times {
-                                        if let Some(time) = times.get(&user_id.get()) {
-                                            user_start_times_json.insert(
-                                                user_id.get().to_string(),
-                                                serde_json::Value::Number((*time).into()),
-                                            );
-                                        }
-                                    }
+                                if let Some(times) = &user_start_times
+                                    && let Some(time) = times.get(&user_id.get())
+                                {
+                                    user_start_times_json.insert(
+                                        user_id.get().to_string(),
+                                        serde_json::Value::Number((*time).into()),
+                                    );
                                 }
                             }
                         }
+                    }
 
-                        let recording_metrics_json = guild_rec_metrics.map(|m| {
+                    let recording_metrics_json = guild_rec_metrics.map(|m| {
                             serde_json::json!({
                                 "active_recordings": m.active_recordings.load(Ordering::Relaxed),
                                 "ffmpeg_spawn_failures": m.ffmpeg_spawn_failures.load(Ordering::Relaxed),
@@ -201,19 +202,18 @@ impl Dashboard for MyJammer {
                             })
                         });
 
-                        let event = DashboardEvent {
-                            event_type: "GUILD_VOICE_UPDATE".to_string(),
-                            json_payload: serde_json::json!({
-                                "voice_states": voice_states_json,
-                                "user_start_times": user_start_times_json,
-                                "recording_metrics": recording_metrics_json,
-                            })
-                            .to_string(),
-                        };
+                    let event = DashboardEvent {
+                        event_type: "GUILD_VOICE_UPDATE".to_string(),
+                        json_payload: serde_json::json!({
+                            "voice_states": voice_states_json,
+                            "user_start_times": user_start_times_json,
+                            "recording_metrics": recording_metrics_json,
+                        })
+                        .to_string(),
+                    };
 
-                        if tx.send(Ok(event)).await.is_err() {
-                            break;
-                        }
+                    if tx.send(Ok(event)).await.is_err() {
+                        break;
                     }
                 }
 
@@ -244,25 +244,33 @@ impl Dashboard for MyJammer {
         request: Request<GuildRequest>,
     ) -> Result<Response<ActionResponse>, Status> {
         let req = request.into_inner();
-        let guild_id = GuildId::new(req.guild_id.try_into().unwrap());
+        let guild_id = GuildId::new(
+            u64::try_from(req.guild_id)
+                .map_err(|_| Status::invalid_argument("guild_id must be non-negative"))?,
+        );
 
         let data_guard = self.data_cache.data.read().await;
-        if let Some(songbird) = data_guard.get::<SongbirdKey>() {
-            let manager = songbird.clone();
+        let Some(songbird) = data_guard.get::<SongbirdKey>() else {
+            warn!("disconnect_voice requested but Songbird manager is missing");
+            return Ok(Response::new(ActionResponse {
+                success: false,
+                message: "Voice system is not configured".to_string(),
+            }));
+        };
+        let manager = songbird.clone();
 
-            if manager.get(guild_id).is_some() {
-                if let Err(e) = manager.remove(guild_id).await {
-                    return Ok(Response::new(ActionResponse {
-                        success: false,
-                        message: format!("Failed to disconnect: {}", e),
-                    }));
-                }
-
+        if manager.get(guild_id).is_some() {
+            if let Err(e) = manager.remove(guild_id).await {
                 return Ok(Response::new(ActionResponse {
-                    success: true,
-                    message: "Successfully disconnected from voice".to_string(),
+                    success: false,
+                    message: format!("Failed to disconnect: {}", e),
                 }));
             }
+
+            return Ok(Response::new(ActionResponse {
+                success: true,
+                message: "Successfully disconnected from voice".to_string(),
+            }));
         }
 
         Ok(Response::new(ActionResponse {

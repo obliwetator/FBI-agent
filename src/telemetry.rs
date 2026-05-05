@@ -1,16 +1,15 @@
 use opentelemetry_sdk::Resource;
+use std::error::Error;
 use tracing_subscriber::{Layer, Registry, layer::SubscriberExt};
 
-pub fn init_telemetry() {
+pub fn init_telemetry() -> Result<(), Box<dyn Error + Send + Sync>> {
     let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
-        .build()
-        .expect("Failed to create span exporter");
+        .build()?;
 
     let metrics_exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
-        .build()
-        .expect("Failed to create metric exporter");
+        .build()?;
 
     let resource = Resource::builder_empty()
         .with_attributes([opentelemetry::KeyValue::new(
@@ -55,5 +54,6 @@ pub fn init_telemetry() {
             .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
     );
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber)?;
+    Ok(())
 }

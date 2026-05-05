@@ -235,18 +235,17 @@ impl VoiceEventHandler for Receiver {
                             let now = chrono::Utc::now();
                             let now_ms = now.timestamp_millis();
 
-                            let path = create_path(
+                            let Some(path) = create_path(
                                 self,
                                 now,
-                                &self.inner.pool,
-                                *ssrc,
-                                self.inner.guild_id,
-                                self.inner.channel_id,
                                 user_id.0,
-                                &member,
                                 is_channel_empty,
                             )
-                            .await;
+                            .await
+                            else {
+                                error!("Failed to create recording path for ssrc {}", ssrc);
+                                return None;
+                            };
 
                             let file = match File::create(format!("{}.ogg", path)) {
                                 Ok(f) => f,
@@ -463,7 +462,7 @@ impl VoiceEventHandler for Receiver {
                 .await;
             }
             _ => {
-                unimplemented!()
+                warn!("Unhandled voice event context");
             }
         }
 
@@ -554,14 +553,11 @@ async fn finalize_writer(inner: &Arc<InnerReceiver>, ssrc: u32, event_type: Voic
 async fn create_path(
     _self: &Receiver,
     now: chrono::DateTime<chrono::Utc>,
-    pool: &Pool<Postgres>,
-    _ssrc: u32,
-    guild_id: GuildId,
-    channel_id: ChannelId,
     user_id: u64,
-    _member: &serenity::model::guild::Member,
     is_channel_empty: bool,
-) -> String {
+) -> Option<String> {
+    let guild_id = _self.inner.guild_id;
+    let channel_id = _self.inner.channel_id;
     let file_name = RecordingKey::stem_for(now.timestamp_millis(), user_id as i64);
     let key = RecordingKey::new(
         guild_id.get() as i64,
@@ -576,6 +572,7 @@ async fn create_path(
 
     if let Err(err) = std::fs::create_dir_all(&dir_path) {
         error!("cannot create path {}: {}", dir_path.display(), err);
+        return None;
     };
 
     let null: Option<i64> = None;
@@ -594,7 +591,7 @@ async fn create_path(
         null,
         if is_channel_empty { 1 } else { 2 }
     )
-    .execute(pool)
+    .execute(&_self.inner.pool)
     .await
     {
         Ok(ok) => ok,
@@ -610,9 +607,9 @@ async fn create_path(
                 .metrics
                 .db_query_errors
                 .fetch_add(1, Ordering::Relaxed);
-            panic!()
+            return None;
         }
     };
 
-    combined_path.to_string_lossy().into_owned()
+    Some(combined_path.to_string_lossy().into_owned())
 }

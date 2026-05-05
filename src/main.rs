@@ -1,10 +1,10 @@
-use std::{collections::HashMap, env, sync::Arc};
+use std::{collections::HashMap, env, error::Error, sync::Arc};
 
 use serenity::{all::ApplicationId, client::Cache, http::Http, prelude::*};
 use songbird::{Config, SerenityInit, driver::DecodeMode};
 use sqlx::postgres::PgPoolOptions;
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{
     event_handler::Handler,
@@ -47,42 +47,39 @@ pub struct Custom {
 }
 
 pub async fn get_lock_read(ctx: &Context) -> Arc<RwLock<HashMap<u64, Option<u64>>>> {
-    let lock = {
+    if let Some(lock) = {
         let data_write = ctx.data.read().await;
-        data_write
-            .get::<HelperStruct>()
-            .expect("Expected Helper Struct")
-            .clone()
-    };
+        data_write.get::<HelperStruct>().cloned()
+    } {
+        return lock;
+    }
 
+    error!("HelperStruct missing from typemap; recreating it");
+    let lock = Arc::new(RwLock::new(HashMap::new()));
+    let mut data_write = ctx.data.write().await;
+    data_write.insert::<HelperStruct>(lock.clone());
     lock
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("Failed to install rustls crypto provider");
+        .map_err(|_| "Failed to install rustls crypto provider")?;
 
-    crate::telemetry::init_telemetry();
+    crate::telemetry::init_telemetry()?;
 
     // create relevant folders
-    let path = env::current_dir().unwrap();
+    let path = env::current_dir()?;
     info!("{}", path.display());
     if !std::path::Path::new(events::voice_receiver::RECORDING_FILE_PATH).exists() {
-        match tokio::fs::create_dir_all(events::voice_receiver::RECORDING_FILE_PATH).await {
-            Ok(_) => {}
-            Err(err) => {
-                panic!("cannot create path: {}", err)
-            }
-        };
+        tokio::fs::create_dir_all(events::voice_receiver::RECORDING_FILE_PATH).await?;
     }
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(config::DB_URL)
-        .await
-        .expect("cannot connect to database");
+        .await?;
 
     reaper::reap_zombie_recordings(&pool).await;
 
@@ -114,8 +111,7 @@ async fn main() {
         .intents(intents)
         .register_songbird_from_config(songbird_config)
         .application_id(ApplicationId::new(application_id))
-        .await
-        .expect("Err creating client");
+        .await?;
     {
         let mut data = client.data.write().await;
         // data.insert::<MysqlConnection>(mysql_pool.clone());
@@ -139,14 +135,16 @@ async fn main() {
     // Grab the metrics Arc before moving `client` into the spawn below.
     let process_metrics = {
         let data_read = client.data.read().await;
-        data_read
-            .get::<BotMetricsKey>()
-            .cloned()
-            .expect("BotMetrics not inserted")
+        data_read.get::<BotMetricsKey>().cloned()
+    };
+    let Some(process_metrics) = process_metrics else {
+        return Err("BotMetrics not inserted".into());
     };
 
     let bot = tokio::spawn(async move {
-        client.start().await.unwrap();
+        if let Err(err) = client.start().await {
+            error!("Discord client exited with error: {}", err);
+        }
     });
 
     // Background task: sample process health every 15 seconds.
@@ -157,9 +155,21 @@ async fn main() {
 
     let grpc_server = tokio::spawn(async move {
         #[cfg(debug_assertions)]
-        let addr = "[::1]:50053".parse().unwrap();
+        let addr = match "[::1]:50053".parse() {
+            Ok(addr) => addr,
+            Err(err) => {
+                error!("Invalid gRPC debug address: {}", err);
+                return;
+            }
+        };
         #[cfg(not(debug_assertions))]
-        let addr = "[::1]:50052".parse().unwrap();
+        let addr = match "[::1]:50052".parse() {
+            Ok(addr) => addr,
+            Err(err) => {
+                error!("Invalid gRPC release address: {}", err);
+                return;
+            }
+        };
 
         let jammer = MyJammer::new(custom.clone());
 
@@ -170,7 +180,16 @@ async fn main() {
             .add_service(crate::grpc::hello_world::dashboard_server::DashboardServer::new(jammer))
             .serve(addr)
             .await
+            .unwrap_or_else(|err| error!("gRPC server failed: {}", err));
     });
 
-    let (_, _) = tokio::join!(bot, grpc_server);
+    let (bot_result, grpc_result) = tokio::join!(bot, grpc_server);
+    if let Err(err) = bot_result {
+        error!("Discord task join error: {}", err);
+    }
+    if let Err(err) = grpc_result {
+        error!("gRPC task join error: {}", err);
+    }
+
+    Ok(())
 }

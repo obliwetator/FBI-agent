@@ -88,8 +88,11 @@ pub async fn voice_state_update(
             let user_id = new_state.user_id.get();
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or_else(|err| {
+                    error!("System clock before UNIX_EPOCH: {}", err);
+                    0
+                });
 
             if let Some(new_ch) = new_state.channel_id {
                 if let Some(old) = &old_state {
@@ -112,9 +115,8 @@ pub async fn voice_state_update(
         let guild_id = match new_state.guild_id {
             Some(ok) => ok,
             None => {
-                // This should never happen
                 error!("No guild id in voice_state_update");
-                panic!()
+                return;
             }
         };
         if member.user.bot {
@@ -129,20 +131,19 @@ pub async fn voice_state_update(
             return;
         }
 
-        if let Some(old) = old_state {
-            if let Some(new_channel_id) = new_state.channel_id {
-                if let Some(old_channel_id) = old.channel_id {
-                    // We can check for various things that happened after the user has connected
-                    // We don't care about any events at the moment
-                    if new_channel_id == old_channel_id {
-                        // An action happened that was NOT switching channels.
-                        log_voice_state_changes(&old, &new_state);
-                        return;
-                    } else {
-                        // user switched channels
-                        info!("user switched channels");
-                    }
-                }
+        if let Some(old) = old_state
+            && let Some(new_channel_id) = new_state.channel_id
+            && let Some(old_channel_id) = old.channel_id
+        {
+            // We can check for various things that happened after the user has connected
+            // We don't care about any events at the moment
+            if new_channel_id == old_channel_id {
+                // An action happened that was NOT switching channels.
+                log_voice_state_changes(&old, &new_state);
+                return;
+            } else {
+                // user switched channels
+                info!("user switched channels");
             }
         }
 
@@ -168,7 +169,6 @@ pub async fn voice_state_update(
         }
     } else {
         error!("No member in new_state");
-        panic!();
     }
 }
 
@@ -187,8 +187,11 @@ async fn handle_no_people_in_channel(
             // From testing this will never trigger because the bot is disconnected before an event is received
             // Check if the our application was kicked
             info!("bot was kicked/left");
-            let guild_id = new_state.guild_id.unwrap();
-            leave_voice_channel(ctx, guild_id).await;
+            if let Some(guild_id) = new_state.guild_id {
+                leave_voice_channel(ctx, guild_id).await;
+            } else {
+                error!("Bot voice leave event had no guild id");
+            }
             return true;
         }
 
@@ -213,7 +216,7 @@ async fn handle_no_people_in_channel(
                 }
             };
 
-            let vec = match guild_channel.members(&ctx) {
+            let vec = match guild_channel.members(ctx) {
                 Ok(m) => m,
                 Err(err) => {
                     error!("Could not get channel members: {}", err);
@@ -228,7 +231,7 @@ async fn handle_no_people_in_channel(
                 .collect();
 
             // No Human users left, just the bot is left
-            if members.len() == 0 {
+            if members.is_empty() {
                 // info!("No more human users left. Leaving channel");
                 return true;
             } else {
@@ -237,7 +240,7 @@ async fn handle_no_people_in_channel(
             }
         }
     }
-    return false;
+    false
 }
 
 async fn get_channel_with_most_members(
@@ -261,14 +264,16 @@ async fn get_channel_with_most_members(
 
     // Clone the channels out of the cache so we don't hold a DashMap guard
     // while doing further cache lookups inside the loop (guild_channel.members).
-    let channels: Vec<_> = ctx
-        .cache
-        .guild(guild_id)
-        .expect("cannot clone guild from cache")
-        .channels
-        .values()
-        .cloned()
-        .collect();
+    let channels: Vec<_> = match ctx.cache.guild(guild_id) {
+        Some(guild) => guild.channels.values().cloned().collect(),
+        None => {
+            error!(
+                "Guild {} missing from cache while choosing voice channel",
+                guild_id
+            );
+            return None;
+        }
+    };
 
     let mut highest_channel_id: ChannelId = ChannelId::new(1);
     let mut highest_channel_len: usize = 0;
@@ -303,10 +308,11 @@ async fn get_channel_with_most_members(
 }
 
 async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
-    let manager = songbird::get(ctx)
-        .await
-        .expect("Songbird Voice client placed in at initialisation.")
-        .clone();
+    let Some(manager) = songbird::get(ctx).await else {
+        error!("Songbird manager missing while leaving voice channel");
+        return;
+    };
+    let manager = manager.clone();
 
     let existed = manager.get(guild_id).is_some();
     if manager.remove(guild_id).await.is_ok() && existed {
@@ -330,33 +336,40 @@ pub async fn connect_to_voice_channel(
     user_id: u64,
 ) {
     info!("Connecting to voice channel");
-    let manager = songbird::get(ctx)
-        .await
-        .expect("Songbird Voice client placed in at initialisation.")
-        .clone();
+    let Some(manager) = songbird::get(ctx).await else {
+        error!("Songbird manager missing while connecting to voice channel");
+        return;
+    };
+    let manager = manager.clone();
 
     if let Some(arc_call) = manager.get(guild_id) {
-        // alreday have the call dont rejoin
-        let ch = arc_call.lock().await.current_channel().unwrap();
+        // already have call, check current channel
+        let current = arc_call.lock().await.current_channel();
 
-        if ch.0.get() as u64 != channel_id.get() {
-            info!("Switching channels");
-            join_ch(
-                pool,
-                manager,
-                guild_id,
-                channel_id,
-                ctx,
-                user_id,
-                Some(ch.0.get()),
-            )
-            .await;
-        } else {
-            info!("already in channel");
+        match current {
+            Some(ch) if ch.0.get() == channel_id.get() => {
+                info!("already in channel");
+            }
+            Some(ch) => {
+                info!("Switching channels");
+                join_ch(
+                    pool,
+                    manager,
+                    guild_id,
+                    channel_id,
+                    ctx,
+                    user_id,
+                    Some(ch.0.get()),
+                )
+                .await;
+            }
+            None => {
+                // disconnected (e.g. kicked). Rejoin fresh.
+                info!("Call exists but disconnected, rejoining");
+                join_ch(pool, manager, guild_id, channel_id, ctx, user_id, None).await;
+            }
         }
     } else {
-        // join channel
-
         join_ch(pool, manager, guild_id, channel_id, ctx, user_id, None).await;
     }
 }
@@ -381,9 +394,10 @@ async fn join_ch(
             } else {
                 let metrics = {
                     let data_read = ctx.data.read().await;
-                    let m = data_read
-                        .get::<crate::BotMetricsKey>()
-                        .expect("BotMetrics not found");
+                    let Some(m) = data_read.get::<crate::BotMetricsKey>() else {
+                        error!("BotMetrics missing while joining voice channel");
+                        return;
+                    };
                     m.active_voice_connections
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = m.update_tx.send(());
@@ -405,8 +419,10 @@ async fn join_ch(
             }
         }
         Err(err) => {
-            manager.remove(guild_id).await.unwrap();
-            panic!("cannot join channel 2: {}", err);
+            error!("cannot join channel {}: {}", channel_id, err);
+            if let Err(remove_err) = manager.remove(guild_id).await {
+                error!("failed to clean up failed voice join: {}", remove_err);
+            }
         }
     }
 }

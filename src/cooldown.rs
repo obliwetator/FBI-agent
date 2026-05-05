@@ -31,7 +31,10 @@ impl JamCooldown {
         let cooldown_secs = match resolve_cooldown(pool, guild_id, user_id).await {
             Ok(secs) => secs,
             Err(e) => {
-                warn!("Cooldown lookup failed (guild={}, user={}): {}. Allowing.", guild_id, user_id, e);
+                warn!(
+                    "Cooldown lookup failed (guild={}, user={}): {}. Allowing.",
+                    guild_id, user_id, e
+                );
                 0
             }
         };
@@ -55,6 +58,12 @@ impl JamCooldown {
 
         self.last.insert((guild_id, user_id), now);
         CheckResult::Allowed
+    }
+}
+
+impl Default for JamCooldown {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -15,25 +15,30 @@ const SAMPLES_PER_FRAME: u64 = 960;
 /// Bytes of a pre-encoded 20 ms stereo silent Opus frame. Synthesized once via
 /// audiopus on first use. Inserted on ticks where a tracked user was silent so
 /// the file timeline matches wallclock.
-fn silence_frame() -> &'static [u8] {
-    static CELL: OnceLock<Vec<u8>> = OnceLock::new();
-    CELL.get_or_init(|| {
+fn silence_frame() -> std::io::Result<&'static [u8]> {
+    static CELL: OnceLock<std::io::Result<Vec<u8>>> = OnceLock::new();
+    let result = CELL.get_or_init(|| {
         use opus2::{Application, Channels, Encoder};
         let mut enc = Encoder::new(48000, Channels::Stereo, Application::Voip)
-            .expect("opus encoder init");
+            .map_err(|err| std::io::Error::other(format!("opus encoder init: {}", err)))?;
         let pcm = vec![0i16; (SAMPLES_PER_FRAME as usize) * 2];
         let mut out = vec![0u8; 256];
         let n = enc
             .encode(&pcm, &mut out)
-            .expect("encode silence frame");
+            .map_err(|err| std::io::Error::other(format!("encode silence frame: {}", err)))?;
         out.truncate(n);
-        out
-    })
+        Ok(out)
+    });
+
+    result
+        .as_ref()
+        .map(|bytes| bytes.as_slice())
+        .map_err(|err| std::io::Error::new(err.kind(), err.to_string()))
 }
 
 /// Returns a clone of the cached silence frame bytes.
-pub fn silence_frame_bytes() -> Vec<u8> {
-    silence_frame().to_vec()
+pub fn silence_frame_bytes() -> std::io::Result<Vec<u8>> {
+    silence_frame().map(|bytes| bytes.to_vec())
 }
 
 pub struct OggOpusWriter<W: Write> {
@@ -96,7 +101,7 @@ impl<W: Write> OggOpusWriter<W> {
     /// Append `count` silent 20 ms frames in one go (used when a user joins
     /// mid-session and we need to align their file with session-start).
     pub fn write_silence(&mut self, count: u64) -> std::io::Result<()> {
-        let bytes = silence_frame_bytes();
+        let bytes = silence_frame_bytes()?;
         for _ in 0..count {
             self.write_packet(&bytes)?;
         }
@@ -140,22 +145,23 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn silence_frame_is_nonempty_and_cached() {
-        let a = silence_frame_bytes();
-        let b = silence_frame_bytes();
+    fn silence_frame_is_nonempty_and_cached() -> Result<(), Box<dyn std::error::Error>> {
+        let a = silence_frame_bytes()?;
+        let b = silence_frame_bytes()?;
         assert!(!a.is_empty());
         assert_eq!(a, b, "cached frame should be deterministic");
+        Ok(())
     }
 
     #[test]
-    fn writes_headers_and_packets_and_finishes() {
+    fn writes_headers_and_packets_and_finishes() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = Vec::new();
         {
-            let mut w = OggOpusWriter::new(Cursor::new(&mut buf), 12345, 0).unwrap();
+            let mut w = OggOpusWriter::new(Cursor::new(&mut buf), 12345, 0)?;
             // 5 silent frames = 100ms
-            w.write_silence(5).unwrap();
+            w.write_silence(5)?;
             assert_eq!(w.granule(), 5 * SAMPLES_PER_FRAME);
-            w.finish().unwrap();
+            w.finish()?;
         }
         // Sanity: starts with "OggS" capture pattern.
         assert_eq!(&buf[..4], b"OggS", "ogg capture pattern at start");
@@ -163,9 +169,9 @@ mod tests {
         // Re-read with the ogg crate to confirm structure: should yield
         // OpusHead, OpusTags, 5 audio packets, then EOS.
         let mut reader = ogg::PacketReader::new(Cursor::new(&buf));
-        let head = reader.read_packet_expected().unwrap();
+        let head = reader.read_packet_expected()?;
         assert_eq!(&head.data[..8], b"OpusHead");
-        let tags = reader.read_packet_expected().unwrap();
+        let tags = reader.read_packet_expected()?;
         assert_eq!(&tags.data[..8], b"OpusTags");
         let mut audio_count = 0;
         while let Ok(Some(p)) = reader.read_packet() {
@@ -176,5 +182,6 @@ mod tests {
             }
         }
         assert_eq!(audio_count, 5);
+        Ok(())
     }
 }
