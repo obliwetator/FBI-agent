@@ -6,7 +6,6 @@ use songbird::SongbirdKey;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
 
-use crate::config::APPLICATION_ID_RELEASE;
 use crate::cooldown::CheckResult;
 
 use super::MyJammer;
@@ -20,6 +19,8 @@ impl Jammer for MyJammer {
         info!("Got a request from {:?}", request);
 
         let data = request.into_inner();
+        let application_id_release = crate::config::application_id_release()
+            .map_err(|err| Status::internal(format!("invalid APPLICATION_ID_RELEASE: {err}")))?;
 
         match self
             .data_cache
@@ -70,7 +71,7 @@ impl Jammer for MyJammer {
                 }
             };
             for member in &members {
-                if member.user.id == APPLICATION_ID_RELEASE {
+                if member.user.id == application_id_release {
                     info!(
                         "Ladies and gentlemen, We got him in c {}",
                         guild_channel.id.get()

@@ -935,6 +935,7 @@ dependencies = [
  "console-subscriber",
  "crossbeam",
  "dashmap 6.1.0",
+ "dotenvy",
  "ogg",
  "opentelemetry",
  "opentelemetry-otlp",

@@ -63,6 +63,8 @@ pub async fn get_lock_read(ctx: &Context) -> Arc<RwLock<HashMap<u64, Option<u64>
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    dotenvy::dotenv().ok();
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| "Failed to install rustls crypto provider")?;
@@ -76,20 +78,17 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         tokio::fs::create_dir_all(events::voice_receiver::RECORDING_FILE_PATH).await?;
     }
 
+    let db_url = config::db_url()?;
     let pool = PgPoolOptions::new()
         .max_connections(5)
-        .connect(config::DB_URL)
+        .connect(&db_url)
         .await?;
 
     reaper::reap_zombie_recordings(&pool).await;
 
     // let a = conn.exec_map("SELECT * FROM guilds WHERE id IN (:id)", db_param, | id | DBGuild { id });
     // Configure the client with your Discord bot token in the environment.
-    #[cfg(debug_assertions)]
-    let (token, application_id) = (config::TOKEN_DEBUG, config::APPLICATION_ID_DEBUG);
-
-    #[cfg(not(debug_assertions))]
-    let (token, application_id) = (config::TOKEN_RELEASE, config::APPLICATION_ID_RELEASE);
+    let discord_config = config::discord_config()?;
 
     // Here, we need to configure Songbird to decode all incoming voice packets.
     // If you want, you can do this on a per-call basis---here, we need it to
@@ -103,14 +102,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // by Discord for bot users.
     let jam_cooldown = crate::cooldown::JamCooldown::new();
 
-    let mut client = Client::builder(token, intents)
+    let mut client = Client::builder(discord_config.token, intents)
         .event_handler(Handler {
             database: pool.clone(),
             jam_cooldown: jam_cooldown.clone(),
         })
         .intents(intents)
         .register_songbird_from_config(songbird_config)
-        .application_id(ApplicationId::new(application_id))
+        .application_id(ApplicationId::new(discord_config.application_id))
         .await?;
     {
         let mut data = client.data.write().await;

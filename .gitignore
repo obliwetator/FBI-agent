@@ -1,6 +1,5 @@
 /target
 .env
-/src/config.rs
 /voice_recordings
 /voice_recordings.bak
 /waveform_data
