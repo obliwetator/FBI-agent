@@ -359,19 +359,46 @@ pub async fn connect_to_voice_channel(
                     channel_id,
                     ctx,
                     user_id,
-                    Some(ch.0.get()),
+                    JoinMode::Switch {
+                        _old_channel: ch.0.get(),
+                    },
                 )
                 .await;
             }
             None => {
-                // disconnected (e.g. kicked). Rejoin fresh.
+                // Disconnected (e.g. kicked). Keep existing receiver handlers
+                // so recoverable recording state can resume on DriverConnect.
                 info!("Call exists but disconnected, rejoining");
-                join_ch(pool, manager, guild_id, channel_id, ctx, user_id, None).await;
+                join_ch(
+                    pool,
+                    manager,
+                    guild_id,
+                    channel_id,
+                    ctx,
+                    user_id,
+                    JoinMode::RejoinDisconnected,
+                )
+                .await;
             }
         }
     } else {
-        join_ch(pool, manager, guild_id, channel_id, ctx, user_id, None).await;
+        join_ch(
+            pool,
+            manager,
+            guild_id,
+            channel_id,
+            ctx,
+            user_id,
+            JoinMode::Fresh,
+        )
+        .await;
     }
+}
+
+enum JoinMode {
+    Fresh,
+    RejoinDisconnected,
+    Switch { _old_channel: u64 },
 }
 
 async fn join_ch(
@@ -381,13 +408,15 @@ async fn join_ch(
     channel_id: ChannelId,
     ctx: &Context,
     _user_id: u64,
-    old_channel: Option<u64>,
+    mode: JoinMode,
 ) {
-    if old_channel.is_none() {
+    if !matches!(mode, JoinMode::Switch { .. }) {
         let handler_lock = manager.get_or_insert(guild_id);
         let result = {
             let mut handler = handler_lock.lock().await;
-            register_voice_receiver(&mut handler, pool, ctx, guild_id, channel_id, true).await;
+            if matches!(mode, JoinMode::Fresh) {
+                register_voice_receiver(&mut handler, pool, ctx, guild_id, channel_id, true).await;
+            }
             handler.join(channel_id).await
         };
 

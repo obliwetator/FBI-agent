@@ -184,4 +184,18 @@ mod tests {
         assert_eq!(audio_count, 5);
         Ok(())
     }
+
+    #[test]
+    fn gap_silence_extends_granule() -> Result<(), Box<dyn std::error::Error>> {
+        let mut buf = Vec::new();
+        let mut w = OggOpusWriter::new(Cursor::new(&mut buf), 12345, 0)?;
+
+        w.write_silence(2)?;
+        assert_eq!(w.granule(), 2 * SAMPLES_PER_FRAME);
+
+        w.write_silence(3)?;
+        assert_eq!(w.granule(), 5 * SAMPLES_PER_FRAME);
+
+        Ok(())
+    }
 }
