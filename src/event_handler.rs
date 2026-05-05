@@ -346,6 +346,7 @@ impl EventHandler for Handler {
                 crate::commands::voice_controls::register_queue(),
                 crate::commands::voice_controls::register_skip(),
                 crate::commands::voice_controls::register_stop(),
+                crate::commands::voice_controls::register_join(),
                 crate::commands::stamp::register_stamp(),
             ],
         )

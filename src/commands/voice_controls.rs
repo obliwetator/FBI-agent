@@ -1,4 +1,6 @@
 use serenity::builder::{CreateCommand, CreateCommandOption};
+use serenity::client::Context;
+use serenity::model::id::{ChannelId, UserId};
 use serenity::model::prelude::CommandOptionType;
 
 use crate::events::voice_receiver::CLIPS_FILE_PATH;
@@ -109,6 +111,35 @@ pub async fn stop(manager: &std::sync::Arc<Songbird>, guild_id: GuildId) -> Stri
     }
 }
 
+pub async fn join(
+    pool: &Pool<Postgres>,
+    ctx: &Context,
+    guild_id: GuildId,
+    user_id: UserId,
+) -> String {
+    let channel_id = match user_voice_channel(ctx, guild_id, user_id) {
+        Some(id) => id,
+        None => return "You must be in a voice channel to use /join.".to_string(),
+    };
+
+    crate::events::voice::connect_to_voice_channel(
+        pool.clone(),
+        ctx,
+        guild_id,
+        channel_id,
+        user_id.get(),
+    )
+    .await;
+
+    "Joined your voice channel.".to_string()
+}
+
+fn user_voice_channel(ctx: &Context, guild_id: GuildId, user_id: UserId) -> Option<ChannelId> {
+    let guild = ctx.cache.guild(guild_id)?;
+    let voice_state = guild.voice_states.get(&user_id)?;
+    voice_state.channel_id
+}
+
 pub fn register_queue() -> CreateCommand {
     CreateCommand::new("queue").description("List how many tracks are in the queue")
 }
@@ -119,4 +150,8 @@ pub fn register_skip() -> CreateCommand {
 
 pub fn register_stop() -> CreateCommand {
     CreateCommand::new("stop").description("Stop playback and clear the queue")
+}
+
+pub fn register_join() -> CreateCommand {
+    CreateCommand::new("join").description("Join your current voice channel")
 }

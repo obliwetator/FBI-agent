@@ -387,7 +387,7 @@ async fn join_ch(
         let handler_lock = manager.get_or_insert(guild_id);
         let result = {
             let mut handler = handler_lock.lock().await;
-            register_voice_receiver(&mut handler, pool, ctx, guild_id, channel_id).await;
+            register_voice_receiver(&mut handler, pool, ctx, guild_id, channel_id, true).await;
             handler.join(channel_id).await
         };
 
@@ -437,7 +437,12 @@ async fn register_voice_receiver(
     ctx: &Context,
     guild_id: GuildId,
     channel_id: ChannelId,
+    reset_existing_handlers: bool,
 ) {
+    if reset_existing_handlers {
+        handler.remove_all_global_events();
+    }
+
     let metrics = {
         let data_read = ctx.data.read().await;
         let Some(m) = data_read.get::<crate::BotMetricsKey>() else {

@@ -49,6 +49,10 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                     response_msg =
                         response_msg.content(handle_stop(&application_command, &ctx).await)
                 }
+                "join" => {
+                    response_msg = response_msg
+                        .content(handle_join(&application_command, &ctx, &_self.database).await)
+                }
                 "stamp" => {
                     response_msg = response_msg.content(
                         crate::commands::stamp::handle_stamp(
@@ -338,4 +342,17 @@ async fn handle_stop(application_command: &CommandInteraction, ctx: &Context) ->
     };
 
     crate::commands::voice_controls::stop(&manager, guild_id).await
+}
+
+async fn handle_join(
+    application_command: &CommandInteraction,
+    ctx: &Context,
+    pool: &sqlx::Pool<sqlx::Postgres>,
+) -> String {
+    let guild_id = match application_command.guild_id {
+        Some(id) => id,
+        None => return "This command can only be used in a server.".to_string(),
+    };
+
+    crate::commands::voice_controls::join(pool, ctx, guild_id, application_command.user.id).await
 }
