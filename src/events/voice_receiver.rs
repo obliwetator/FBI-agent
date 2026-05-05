@@ -7,7 +7,7 @@ use serenity::{
 };
 use songbird::{
     Event, EventContext, EventHandler as VoiceEventHandler,
-    events::context_data::{ConnectData, DisconnectData},
+    events::context_data::{ConnectData, DisconnectData, DisconnectReason},
     model::payload::{ClientDisconnect, Speaking},
     packet::{Packet, PacketSize, rtp::RtpExtensionPacket},
 };
@@ -24,8 +24,11 @@ use crate::events::ogg_opus_writer::OggOpusWriter;
 
 pub const RECORDING_FILE_PATH: &str = RECORDING_ROOT;
 pub const CLIPS_FILE_PATH: &str = CLIPS_ROOT;
+const RECOVERABLE_DISCONNECT_TIMEOUT_MS: u64 = 60_000;
+const RESUME_INTENTIONAL_DISCONNECTS_FOR_TESTING: bool = false;
 
 #[repr(i32)]
+#[derive(Clone, Copy)]
 pub enum VoiceEventType {
     WriterOpen = 1,
     WriterClose = 2,
@@ -65,6 +68,9 @@ pub struct InnerReceiver {
     /// 0 = inactive. Used to pad new joiners' files with leading silence so
     /// every per-user .ogg shares granule-zero = session-start.
     session_start_ms: AtomicI64,
+    /// Wallclock millisecond when a recoverable driver disconnect began.
+    /// 0 = active/no pending resume.
+    disconnected_at_ms: AtomicI64,
 }
 
 impl Drop for Receiver {
@@ -101,6 +107,7 @@ impl Receiver {
             guild_metrics,
             last_voice_packet_time: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
             session_start_ms: AtomicI64::new(0),
+            disconnected_at_ms: AtomicI64::new(0),
         });
 
         // Spawn Health Checker / Reaper
@@ -114,6 +121,10 @@ impl Receiver {
                     Some(i) => i,
                     None => break,
                 };
+
+                if inner_clone.disconnected_at_ms.load(Ordering::SeqCst) > 0 {
+                    continue;
+                }
 
                 let mut users_to_remove = Vec::new();
 
@@ -212,9 +223,9 @@ impl VoiceEventHandler for Receiver {
                     )
                     .await;
 
-                    let is_channel_empty = {
-                        let len = self.inner.user_id_hashmap.read().await.len();
-                        len == 0
+                    let (is_channel_empty, previous_ssrc) = {
+                        let users = self.inner.user_id_hashmap.read().await;
+                        (users.is_empty(), users.get(&user_id.0).copied())
                     };
 
                     {
@@ -228,8 +239,28 @@ impl VoiceEventHandler for Receiver {
                     {
                         // Single write-lock for the check-and-insert to avoid TOCTOU.
                         let mut writer_map = self.inner.ssrc_writer_hashmap.write().await;
+                        if let Some(previous_ssrc) = previous_ssrc {
+                            if previous_ssrc == *ssrc {
+                                info!("Writer already active for ssrc {}", ssrc);
+                                return None;
+                            }
+
+                            if let Some(recording) = writer_map.remove(&previous_ssrc) {
+                                writer_map.insert(*ssrc, recording.clone());
+                                drop(writer_map);
+
+                                let mut rec = recording.lock().await;
+                                rec.ssrc = *ssrc;
+                                info!(
+                                    "Remapped active writer for user {} from ssrc {} to {}",
+                                    user_id.0, previous_ssrc, ssrc
+                                );
+                                return None;
+                            }
+                        }
+
                         if writer_map.contains_key(ssrc) {
-                            error!("already got writer for ssrc {}", ssrc);
+                            info!("Writer already active for ssrc {}", ssrc);
                         } else {
                             info!("New writer for ssrc {}", ssrc);
                             let now = chrono::Utc::now();
@@ -406,22 +437,30 @@ impl VoiceEventHandler for Receiver {
                     .driver_disconnects
                     .fetch_add(1, Ordering::Relaxed);
 
-                // Snapshot SSRCs and finalize each writer (writes EOS, runs DB update).
-                let ssrcs: Vec<u32> = {
-                    let map = self.inner.ssrc_writer_hashmap.read().await;
-                    map.keys().copied().collect()
-                };
-                for ssrc in ssrcs {
-                    finalize_writer(&self.inner, ssrc, VoiceEventType::WriterClose).await;
+                if should_resume_recordings_for_disconnect(
+                    reason.as_ref(),
+                    RESUME_INTENTIONAL_DISCONNECTS_FOR_TESTING,
+                ) {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    if self
+                        .inner
+                        .disconnected_at_ms
+                        .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        info!("Recoverable disconnect recorded at {}", now);
+                        schedule_recoverable_disconnect_timeout(&self.inner, now);
+                    }
+                    return None;
                 }
 
-                self.inner.user_id_hashmap.write().await.clear();
-                self.inner.bot_ssrcs.write().await.clear();
-                self.inner.bot_user_id_hashmap.write().await.clear();
-                self.inner.session_start_ms.store(0, Ordering::SeqCst);
+                self.inner.disconnected_at_ms.store(0, Ordering::SeqCst);
+                finalize_all_active_recordings(&self.inner, VoiceEventType::WriterClose).await;
+                clear_receiver_state(&self.inner).await;
             }
             Ctx::DriverConnect(ConnectData { .. }) => {
-                info!("Connected")
+                info!("Connected");
+                resume_after_recoverable_disconnect(&self.inner).await;
             }
             Ctx::DriverReconnect(ConnectData { .. }) => {
                 info!("Reconnected");
@@ -429,6 +468,7 @@ impl VoiceEventHandler for Receiver {
                     .metrics
                     .driver_reconnects
                     .fetch_add(1, Ordering::Relaxed);
+                resume_after_recoverable_disconnect(&self.inner).await;
             }
 
             Ctx::ClientDisconnect(ClientDisconnect { user_id }) => {
@@ -470,9 +510,145 @@ impl VoiceEventHandler for Receiver {
     }
 }
 
+fn silence_frames_for_gap_ms(gap_ms: i64) -> u64 {
+    if gap_ms <= 0 {
+        0
+    } else {
+        (gap_ms as u64).div_ceil(20)
+    }
+}
+
+fn is_intentional_driver_disconnect(reason: Option<&DisconnectReason>) -> bool {
+    reason.is_none() || matches!(reason, Some(DisconnectReason::Requested))
+}
+
+fn should_resume_recordings_for_disconnect(
+    reason: Option<&DisconnectReason>,
+    resume_intentional_disconnects: bool,
+) -> bool {
+    resume_intentional_disconnects || !is_intentional_driver_disconnect(reason)
+}
+
+fn schedule_recoverable_disconnect_timeout(inner: &Arc<InnerReceiver>, disconnected_at_ms: i64) {
+    let inner_weak = Arc::downgrade(inner);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            RECOVERABLE_DISCONNECT_TIMEOUT_MS,
+        ))
+        .await;
+
+        let Some(inner) = inner_weak.upgrade() else {
+            return;
+        };
+
+        if inner
+            .disconnected_at_ms
+            .compare_exchange(disconnected_at_ms, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+
+        warn!(
+            "Recoverable disconnect timed out after {}ms. Closing active recordings.",
+            RECOVERABLE_DISCONNECT_TIMEOUT_MS
+        );
+        finalize_all_active_recordings(&inner, VoiceEventType::WriterClose).await;
+        clear_receiver_state(&inner).await;
+    });
+}
+
+async fn resume_after_recoverable_disconnect(inner: &Arc<InnerReceiver>) {
+    let disconnected_at_ms = inner.disconnected_at_ms.swap(0, Ordering::SeqCst);
+    if disconnected_at_ms == 0 {
+        return;
+    }
+
+    let reconnect_time = chrono::Utc::now();
+    let reconnect_ms = reconnect_time.timestamp_millis();
+    let frames = silence_frames_for_gap_ms(reconnect_ms - disconnected_at_ms);
+    info!(
+        "Resuming recordings after {}ms disconnect with {} silence frames",
+        reconnect_ms - disconnected_at_ms,
+        frames
+    );
+
+    let active: Vec<(u32, Arc<Mutex<UserRecording>>)> = {
+        let map = inner.ssrc_writer_hashmap.read().await;
+        let bots = inner.bot_ssrcs.read().await;
+        map.iter()
+            .filter(|(ssrc, _)| !bots.contains(ssrc))
+            .map(|(ssrc, writer)| (*ssrc, writer.clone()))
+            .collect()
+    };
+
+    for (ssrc, recording) in active {
+        let mut rec = recording.lock().await;
+        if let Err(err) = rec.writer.write_silence(frames) {
+            error!(
+                "Failed to write reconnect gap silence for ssrc {}: {}",
+                ssrc, err
+            );
+        }
+    }
+
+    let mut users_to_remove = Vec::new();
+    {
+        let user_map = inner.user_id_hashmap.read().await;
+        if let Some(guild) = inner.ctx_main.cache.guild(inner.guild_id) {
+            for (&uid, &ssrc) in user_map.iter() {
+                if !guild
+                    .voice_states
+                    .contains_key(&serenity::model::id::UserId::new(uid))
+                {
+                    users_to_remove.push((uid, ssrc));
+                }
+            }
+        }
+    }
+
+    for (uid, ssrc) in users_to_remove {
+        warn!(
+            "User {} (SSRC {}) is no longer in voice after reconnect. Closing writer.",
+            uid, ssrc
+        );
+        inner.user_id_hashmap.write().await.remove(&uid);
+        finalize_writer_at(inner, ssrc, VoiceEventType::WriterClose, reconnect_time).await;
+    }
+}
+
+async fn finalize_all_active_recordings(inner: &Arc<InnerReceiver>, event_type: VoiceEventType) {
+    let close_time = chrono::Utc::now();
+    let ssrcs: Vec<u32> = {
+        let map = inner.ssrc_writer_hashmap.read().await;
+        map.keys().copied().collect()
+    };
+    for ssrc in ssrcs {
+        finalize_writer_at(inner, ssrc, event_type, close_time).await;
+    }
+}
+
+async fn clear_receiver_state(inner: &Arc<InnerReceiver>) {
+    inner.user_id_hashmap.write().await.clear();
+    inner.bot_ssrcs.write().await.clear();
+    inner.bot_user_id_hashmap.write().await.clear();
+    inner.session_start_ms.store(0, Ordering::SeqCst);
+}
+
 /// Close the writer for `ssrc`, run the audio_files DB update, decrement
 /// active counters. Idempotent — silently no-ops if the writer is already gone.
 async fn finalize_writer(inner: &Arc<InnerReceiver>, ssrc: u32, event_type: VoiceEventType) {
+    finalize_writer_at(inner, ssrc, event_type, chrono::Utc::now()).await;
+}
+
+/// Same as `finalize_writer`, but with an explicit close time when the real
+/// leave happened during an outage and only the reconnect time is knowable.
+async fn finalize_writer_at(
+    inner: &Arc<InnerReceiver>,
+    ssrc: u32,
+    event_type: VoiceEventType,
+    close_time: chrono::DateTime<chrono::Utc>,
+) {
     let entry = inner.ssrc_writer_hashmap.write().await.remove(&ssrc);
     let Some(arc) = entry else {
         return;
@@ -506,7 +682,7 @@ async fn finalize_writer(inner: &Arc<InnerReceiver>, ssrc: u32, event_type: Voic
         .active_recordings
         .fetch_sub(1, Ordering::Relaxed);
 
-    let time_elapsed = chrono::Utc::now()
+    let time_elapsed = close_time
         .signed_duration_since(rec.start_time)
         .num_milliseconds();
     let last_person_in_channel = inner.user_id_hashmap.read().await.is_empty();
@@ -612,4 +788,41 @@ async fn create_path(
     };
 
     Some(combined_path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gap_ms_rounds_up_to_20ms_silence_frames() {
+        assert_eq!(silence_frames_for_gap_ms(-1), 0);
+        assert_eq!(silence_frames_for_gap_ms(0), 0);
+        assert_eq!(silence_frames_for_gap_ms(1), 1);
+        assert_eq!(silence_frames_for_gap_ms(20), 1);
+        assert_eq!(silence_frames_for_gap_ms(21), 2);
+        assert_eq!(silence_frames_for_gap_ms(40), 2);
+        assert_eq!(silence_frames_for_gap_ms(41), 3);
+    }
+
+    #[test]
+    fn none_and_requested_disconnects_are_intentional() {
+        assert!(is_intentional_driver_disconnect(None));
+        assert!(is_intentional_driver_disconnect(Some(
+            &DisconnectReason::Requested
+        )));
+        assert!(!is_intentional_driver_disconnect(Some(
+            &DisconnectReason::TimedOut
+        )));
+    }
+
+    #[test]
+    fn optional_testing_flag_can_resume_intentional_disconnects() {
+        assert!(!should_resume_recordings_for_disconnect(None, false));
+        assert!(should_resume_recordings_for_disconnect(None, true));
+        assert!(should_resume_recordings_for_disconnect(
+            Some(&DisconnectReason::TimedOut),
+            false
+        ));
+    }
 }
