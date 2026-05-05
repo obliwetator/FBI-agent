@@ -383,40 +383,44 @@ async fn join_ch(
     _user_id: u64,
     old_channel: Option<u64>,
 ) {
+    if old_channel.is_none() {
+        let handler_lock = manager.get_or_insert(guild_id);
+        let result = {
+            let mut handler = handler_lock.lock().await;
+            register_voice_receiver(&mut handler, pool, ctx, guild_id, channel_id).await;
+            handler.join(channel_id).await
+        };
+
+        match result {
+            Ok(join) => match join.await {
+                Ok(()) => {
+                    info!("Joined {}", channel_id);
+                    record_active_voice_connection(ctx).await;
+                }
+                Err(err) => {
+                    error!("cannot join channel {}: {}", channel_id, err);
+                    if let Err(remove_err) = manager.remove(guild_id).await {
+                        error!("failed to clean up failed voice join: {}", remove_err);
+                    }
+                }
+            },
+            Err(err) => {
+                error!("cannot join channel {}: {}", channel_id, err);
+                if let Err(remove_err) = manager.remove(guild_id).await {
+                    error!("failed to clean up failed voice join: {}", remove_err);
+                }
+            }
+        }
+        return;
+    }
+
     let result_handler_lock = manager.join(guild_id, channel_id).await;
     match result_handler_lock {
-        Ok(handler_lock) => {
+        Ok(_) => {
             info!("Joined {}", channel_id);
 
-            if old_channel.is_some() {
-                // switching channels. Don't re-register. Cleanup
-                info!("Clean up switching chanels");
-            } else {
-                let metrics = {
-                    let data_read = ctx.data.read().await;
-                    let Some(m) = data_read.get::<crate::BotMetricsKey>() else {
-                        error!("BotMetrics missing while joining voice channel");
-                        return;
-                    };
-                    m.active_voice_connections
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let _ = m.update_tx.send(());
-                    m.clone()
-                };
-
-                let mut handler = handler_lock.lock().await;
-
-                let ctx1 = Arc::new(ctx.clone());
-                let receiver = Receiver::new(pool, ctx1, guild_id, channel_id, metrics).await;
-
-                handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
-                handler.add_global_event(CoreEvent::VoiceTick.into(), receiver.clone());
-                handler.add_global_event(CoreEvent::RtcpPacket.into(), receiver.clone());
-                handler.add_global_event(CoreEvent::ClientDisconnect.into(), receiver.clone());
-                handler.add_global_event(CoreEvent::DriverConnect.into(), receiver.clone());
-                handler.add_global_event(CoreEvent::DriverReconnect.into(), receiver.clone());
-                handler.add_global_event(CoreEvent::DriverDisconnect.into(), receiver.clone());
-            }
+            // switching channels. Don't re-register. Cleanup
+            info!("Clean up switching chanels");
         }
         Err(err) => {
             error!("cannot join channel {}: {}", channel_id, err);
@@ -425,4 +429,45 @@ async fn join_ch(
             }
         }
     }
+}
+
+async fn register_voice_receiver(
+    handler: &mut songbird::Call,
+    pool: Pool<Postgres>,
+    ctx: &Context,
+    guild_id: GuildId,
+    channel_id: ChannelId,
+) {
+    let metrics = {
+        let data_read = ctx.data.read().await;
+        let Some(m) = data_read.get::<crate::BotMetricsKey>() else {
+            error!("BotMetrics missing while joining voice channel");
+            return;
+        };
+        m.clone()
+    };
+
+    let ctx1 = Arc::new(ctx.clone());
+    let receiver = Receiver::new(pool, ctx1, guild_id, channel_id, metrics).await;
+
+    handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
+    handler.add_global_event(CoreEvent::VoiceTick.into(), receiver.clone());
+    handler.add_global_event(CoreEvent::RtcpPacket.into(), receiver.clone());
+    handler.add_global_event(CoreEvent::ClientDisconnect.into(), receiver.clone());
+    handler.add_global_event(CoreEvent::DriverConnect.into(), receiver.clone());
+    handler.add_global_event(CoreEvent::DriverReconnect.into(), receiver.clone());
+    handler.add_global_event(CoreEvent::DriverDisconnect.into(), receiver.clone());
+}
+
+async fn record_active_voice_connection(ctx: &Context) {
+    let data_read = ctx.data.read().await;
+    let Some(metrics) = data_read.get::<crate::BotMetricsKey>() else {
+        error!("BotMetrics missing while recording active voice connection");
+        return;
+    };
+
+    metrics
+        .active_voice_connections
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _ = metrics.update_tx.send(());
 }
