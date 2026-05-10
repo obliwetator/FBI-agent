@@ -75,7 +75,7 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                 .create_response(&ctx.http, CreateInteractionResponse::Message(response_msg))
                 .await
             {
-                info!("Cannot respond to slash command: {}", why);
+                warn!("Cannot respond to slash command: {}", why);
             }
         }
         Interaction::Component(component) => {
@@ -101,7 +101,7 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                     )
                     .await
                 {
-                    info!("Cannot respond to replay button: {}", why);
+                    warn!("Cannot respond to replay button: {}", why);
                 }
             } else {
                 warn!(
@@ -119,13 +119,8 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
                     .unwrap_or("");
 
                 let guild_id = autocomplete.guild_id.map(|id| id.get() as i64).unwrap_or(0);
-                info!(
-                    "Autocomplete request for 'jam' - guild_id: {}, focused_value: '{}'",
-                    guild_id, focused_value
-                );
 
                 let choices = get_clip_choices(focused_value, &_self.database, guild_id).await;
-                info!("Autocomplete returned {} choices", choices.len());
 
                 if let Err(why) = autocomplete
                     .create_response(
@@ -164,10 +159,6 @@ async fn get_clip_choices(
     guild_id: i64,
 ) -> Vec<AutocompleteChoice> {
     let query_wildcard = format!("%{}%", query);
-    info!(
-        "Querying clips - guild_id: {}, query: {}",
-        guild_id, query_wildcard
-    );
 
     let rows = sqlx::query!(
         "SELECT name, clip_id FROM clips WHERE guild_id = $1 AND name ILIKE $2 AND deleted_at IS NULL LIMIT 25",
@@ -194,8 +185,6 @@ async fn handle_jam(
     pool: &sqlx::Pool<sqlx::Postgres>,
     cooldown: &crate::cooldown::JamCooldown,
 ) -> (String, Option<String>) {
-    info!("Handling jam command: {:?}", application_command.data);
-
     let clip_name = application_command.data.options.first().and_then(|o| {
         if let CommandDataOptionValue::String(s) = &o.value {
             Some(s.clone())
@@ -211,8 +200,6 @@ async fn handle_jam(
             return ("Please provide a clip name.".to_string(), None);
         }
     };
-
-    info!("Extracted clip name: {}", clip_name);
 
     let manager = match songbird::get(ctx).await {
         Some(m) => m,
@@ -246,19 +233,10 @@ async fn handle_jam(
             );
         }
     }
-
-    info!(
-        "Attempting to play clip {} in guild {}",
-        clip_name, guild_id
-    );
-
     match crate::commands::voice_controls::play_clip(pool, &manager, guild_id, &clip_name, user_id)
         .await
     {
-        Ok(msg) => {
-            info!("Successfully played clip: {}", msg);
-            (msg, Some(clip_name))
-        }
+        Ok(msg) => (msg, Some(clip_name)),
         Err(e) => {
             warn!("Failed to play clip: {}", e);
             (e, None)

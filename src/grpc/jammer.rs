@@ -16,8 +16,6 @@ use super::hello_world::{JamData, JamResponse};
 #[tonic::async_trait]
 impl Jammer for MyJammer {
     async fn jam_it(&self, request: Request<JamData>) -> Result<Response<JamResponse>, Status> {
-        info!("Got a request from {:?}", request);
-
         let data = request.into_inner();
         let application_id_release = crate::config::application_id_release()
             .map_err(|err| Status::internal(format!("invalid APPLICATION_ID_RELEASE: {err}")))?;
@@ -70,6 +68,7 @@ impl Jammer for MyJammer {
                     continue;
                 }
             };
+
             for member in &members {
                 if member.user.id == application_id_release {
                     info!(

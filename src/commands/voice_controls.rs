@@ -35,7 +35,6 @@ pub async fn play_clip(
         return Err(format!("Clip with ID '{}' not found in database.", clip_id));
     };
 
-    info!("Clips to play: {}/{}", CLIPS_FILE_PATH, saved_file_name);
     let result = songbird::input::File::new(format!("{}/{}", CLIPS_FILE_PATH, saved_file_name));
     let input = songbird::input::Input::from(result);
 
