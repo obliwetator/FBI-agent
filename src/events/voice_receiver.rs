@@ -468,10 +468,15 @@ impl VoiceEventHandler for Receiver {
             Ctx::DriverDisconnect(DisconnectData { kind, reason, .. }) => {
                 info!("Disconnected \n kind: {:?} \n reason {:?}", kind, reason);
 
-                self.inner
-                    .metrics
-                    .driver_disconnects
-                    .fetch_add(1, Ordering::Relaxed);
+                // TODO: Log only  unexpected driver discoenncets and unrequested
+                if *kind == songbird::events::context_data::DisconnectKind::Runtime
+                    || *reason != Some(DisconnectReason::Requested)
+                {
+                    self.inner
+                        .metrics
+                        .driver_disconnects
+                        .fetch_add(1, Ordering::Relaxed);
+                }
 
                 let channel_has_human_members = recording_channel_has_human_members(&self.inner);
                 let should_finalize_empty_channel_disconnect =
