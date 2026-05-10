@@ -1,3 +1,5 @@
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::Histogram;
 use serenity::prelude::TypeMapKey;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64};
@@ -32,6 +34,25 @@ impl Default for GuildRecordingMetrics {
     }
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub struct VoiceUserKey {
+    pub guild_id: u64,
+    pub user_id: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct VoiceUserPresence {
+    pub channel_id: u64,
+    pub is_bot: bool,
+    pub server_mute: bool,
+    pub server_deaf: bool,
+    pub self_mute: bool,
+    pub self_deaf: bool,
+    pub suppress: bool,
+    pub streaming: bool,
+    pub video: bool,
+}
+
 pub struct BotMetrics {
     pub start_time: Instant,
     pub commands_executed: AtomicU32,
@@ -41,13 +62,22 @@ pub struct BotMetrics {
     pub user_start_times: dashmap::DashMap<u64, i64>,
     // Voice recording pipeline — global aggregates
     pub active_recordings: AtomicU32,
+    pub recordings_started: AtomicU64,
+    pub recordings_finished: AtomicU64,
+    pub recording_finalize_errors: AtomicU64,
     pub ffmpeg_spawn_failures: AtomicU32,
     pub ffmpeg_process_crashes: AtomicU32,
     pub audio_packets_received: AtomicU64,
     pub audio_packets_dropped: AtomicU64,
     pub last_voice_packet_time: AtomicI64,
+    recording_duration_seconds: Histogram<f64>,
     // Voice recording pipeline — per-guild breakdown
     pub guild_recording_metrics: dashmap::DashMap<u64, Arc<GuildRecordingMetrics>>,
+    // Voice recording pipeline — per-channel breakdown
+    pub channel_recording_metrics: dashmap::DashMap<(u64, u64), Arc<GuildRecordingMetrics>>,
+    // Current voice channel presence keyed by guild/user.
+    pub voice_users: dashmap::DashMap<VoiceUserKey, VoiceUserPresence>,
+    pub active_recording_users: dashmap::DashMap<VoiceUserKey, u64>,
     // Discord gateway health
     pub gateway_reconnects: AtomicU32,
     pub gateway_disconnects: AtomicU32,
@@ -76,39 +106,80 @@ impl BotMetrics {
             .clone()
     }
 
-    /// Registers standard BotMetrics counters to OpenTelemetry as Observable Gauges.
+    pub fn channel_metrics(&self, guild_id: u64, channel_id: u64) -> Arc<GuildRecordingMetrics> {
+        self.channel_recording_metrics
+            .entry((guild_id, channel_id))
+            .or_insert_with(|| Arc::new(GuildRecordingMetrics::new()))
+            .clone()
+    }
+
+    /// Registers standard BotMetrics instruments to OpenTelemetry.
     pub fn register_otel_metrics(metrics: Arc<Self>) {
         let meter = opentelemetry::global::meter(crate::config::SERVICE_NAME);
 
-        // ── simple gauges (atomic → u64) ──
-        macro_rules! gauge {
+        macro_rules! u32_counter {
             ($name:literal, $desc:literal, $field:ident) => {
-                gauge!($name, $desc, $field, |v| v as u64);
+                let m = metrics.clone();
+                meter
+                    .u64_observable_counter($name)
+                    .with_description($desc)
+                    .with_callback(move |observer| {
+                        observer.observe(
+                            m.$field.load(std::sync::atomic::Ordering::Relaxed) as u64,
+                            &[],
+                        );
+                    })
+                    .build();
             };
-            ($name:literal, $desc:literal, $field:ident, $map:expr) => {{
+        }
+
+        macro_rules! u64_counter {
+            ($name:literal, $desc:literal, $field:ident) => {
+                let m = metrics.clone();
+                meter
+                    .u64_observable_counter($name)
+                    .with_description($desc)
+                    .with_callback(move |observer| {
+                        observer.observe(m.$field.load(std::sync::atomic::Ordering::Relaxed), &[]);
+                    })
+                    .build();
+            };
+        }
+
+        macro_rules! u32_gauge {
+            ($name:literal, $desc:literal, $field:ident) => {
                 let m = metrics.clone();
                 meter
                     .u64_observable_gauge($name)
                     .with_description($desc)
                     .with_callback(move |observer| {
                         observer.observe(
-                            $map(m.$field.load(std::sync::atomic::Ordering::Relaxed)),
+                            m.$field.load(std::sync::atomic::Ordering::Relaxed) as u64,
                             &[],
                         );
                     })
                     .build();
-            }};
+            };
         }
 
-        // ── per-guild gauges (GuildRecordingMetrics field → u64) ──
-        macro_rules! guild_gauge {
+        macro_rules! u64_gauge {
             ($name:literal, $desc:literal, $field:ident) => {
-                guild_gauge!($name, $desc, $field, |v| v as u64);
-            };
-            ($name:literal, $desc:literal, $field:ident, $map:expr) => {{
                 let m = metrics.clone();
                 meter
                     .u64_observable_gauge($name)
+                    .with_description($desc)
+                    .with_callback(move |observer| {
+                        observer.observe(m.$field.load(std::sync::atomic::Ordering::Relaxed), &[]);
+                    })
+                    .build();
+            };
+        }
+
+        macro_rules! guild_counter {
+            ($name:literal, $desc:literal, $field:ident, $map:expr) => {{
+                let m = metrics.clone();
+                meter
+                    .u64_observable_counter($name)
                     .with_description($desc)
                     .with_callback(move |observer| {
                         for entry in m.guild_recording_metrics.iter() {
@@ -131,80 +202,561 @@ impl BotMetrics {
             }};
         }
 
-        gauge!(
+        macro_rules! guild_gauge {
+            ($name:literal, $desc:literal, $field:ident) => {
+                let m = metrics.clone();
+                meter
+                    .u64_observable_gauge($name)
+                    .with_description($desc)
+                    .with_callback(move |observer| {
+                        for entry in m.guild_recording_metrics.iter() {
+                            let guild_id = entry.key();
+                            let guild_metrics = entry.value();
+                            observer.observe(
+                                guild_metrics
+                                    .$field
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                    as u64,
+                                &[opentelemetry::KeyValue::new(
+                                    "guild_id",
+                                    guild_id.to_string(),
+                                )],
+                            );
+                        }
+                    })
+                    .build();
+            };
+        }
+
+        macro_rules! channel_counter {
+            ($name:literal, $desc:literal, $field:ident, $map:expr) => {{
+                let m = metrics.clone();
+                meter
+                    .u64_observable_counter($name)
+                    .with_description($desc)
+                    .with_callback(move |observer| {
+                        for entry in m.channel_recording_metrics.iter() {
+                            let (guild_id, channel_id) = entry.key();
+                            let channel_metrics = entry.value();
+                            observer.observe(
+                                $map(
+                                    channel_metrics
+                                        .$field
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                ),
+                                &[
+                                    opentelemetry::KeyValue::new("guild_id", guild_id.to_string()),
+                                    opentelemetry::KeyValue::new(
+                                        "channel_id",
+                                        channel_id.to_string(),
+                                    ),
+                                ],
+                            );
+                        }
+                    })
+                    .build();
+            }};
+        }
+
+        macro_rules! channel_gauge {
+            ($name:literal, $desc:literal, $field:ident) => {
+                let m = metrics.clone();
+                meter
+                    .u64_observable_gauge($name)
+                    .with_description($desc)
+                    .with_callback(move |observer| {
+                        for entry in m.channel_recording_metrics.iter() {
+                            let (guild_id, channel_id) = entry.key();
+                            let channel_metrics = entry.value();
+                            observer.observe(
+                                channel_metrics
+                                    .$field
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                    as u64,
+                                &[
+                                    opentelemetry::KeyValue::new("guild_id", guild_id.to_string()),
+                                    opentelemetry::KeyValue::new(
+                                        "channel_id",
+                                        channel_id.to_string(),
+                                    ),
+                                ],
+                            );
+                        }
+                    })
+                    .build();
+            };
+        }
+
+        {
+            let m = metrics.clone();
+            meter
+                .u64_observable_gauge("voice_user_present")
+                .with_description("Current voice channel presence per user")
+                .with_callback(move |observer| {
+                    for entry in m.voice_users.iter() {
+                        let key = entry.key();
+                        let presence = entry.value();
+                        observer.observe(
+                            1,
+                            &[
+                                KeyValue::new("guild_id", key.guild_id.to_string()),
+                                KeyValue::new("channel_id", presence.channel_id.to_string()),
+                                KeyValue::new("user_id", key.user_id.to_string()),
+                                KeyValue::new("is_bot", presence.is_bot.to_string()),
+                                KeyValue::new("server_mute", presence.server_mute.to_string()),
+                                KeyValue::new("server_deaf", presence.server_deaf.to_string()),
+                                KeyValue::new("self_mute", presence.self_mute.to_string()),
+                                KeyValue::new("self_deaf", presence.self_deaf.to_string()),
+                                KeyValue::new("suppress", presence.suppress.to_string()),
+                                KeyValue::new("streaming", presence.streaming.to_string()),
+                                KeyValue::new("video", presence.video.to_string()),
+                            ],
+                        );
+                    }
+                })
+                .build();
+        }
+
+        {
+            let m = metrics.clone();
+            meter
+                .u64_observable_gauge("voice_channel_users")
+                .with_description("Current voice users per guild/channel")
+                .with_callback(move |observer| {
+                    let mut counts: std::collections::HashMap<(u64, u64, bool), u64> =
+                        std::collections::HashMap::new();
+                    for entry in m.voice_users.iter() {
+                        let key = entry.key();
+                        let presence = entry.value();
+                        *counts
+                            .entry((key.guild_id, presence.channel_id, presence.is_bot))
+                            .or_default() += 1;
+                    }
+                    for ((guild_id, channel_id, is_bot), count) in counts {
+                        observer.observe(
+                            count,
+                            &[
+                                KeyValue::new("guild_id", guild_id.to_string()),
+                                KeyValue::new("channel_id", channel_id.to_string()),
+                                KeyValue::new("is_bot", is_bot.to_string()),
+                            ],
+                        );
+                    }
+                })
+                .build();
+        }
+
+        {
+            let m = metrics.clone();
+            meter
+                .u64_observable_gauge("voice_channel_state_users")
+                .with_description("Current voice users per guild/channel/state")
+                .with_callback(move |observer| {
+                    let mut counts: std::collections::HashMap<(u64, u64, &'static str), u64> =
+                        std::collections::HashMap::new();
+                    for entry in m.voice_users.iter() {
+                        let key = entry.key();
+                        let presence = entry.value();
+                        let states = [
+                            ("server_mute", presence.server_mute),
+                            ("server_deaf", presence.server_deaf),
+                            ("self_mute", presence.self_mute),
+                            ("self_deaf", presence.self_deaf),
+                            ("suppress", presence.suppress),
+                            ("streaming", presence.streaming),
+                            ("video", presence.video),
+                        ];
+                        for (state, enabled) in states {
+                            if enabled {
+                                *counts
+                                    .entry((key.guild_id, presence.channel_id, state))
+                                    .or_default() += 1;
+                            }
+                        }
+                    }
+                    for ((guild_id, channel_id, state), count) in counts {
+                        observer.observe(
+                            count,
+                            &[
+                                KeyValue::new("guild_id", guild_id.to_string()),
+                                KeyValue::new("channel_id", channel_id.to_string()),
+                                KeyValue::new("state", state),
+                            ],
+                        );
+                    }
+                })
+                .build();
+        }
+
+        {
+            let m = metrics.clone();
+            meter
+                .u64_observable_gauge("recording_user_active")
+                .with_description("Current active recording users")
+                .with_callback(move |observer| {
+                    for entry in m.active_recording_users.iter() {
+                        let key = entry.key();
+                        let channel_id = entry.value();
+                        observer.observe(
+                            1,
+                            &[
+                                KeyValue::new("guild_id", key.guild_id.to_string()),
+                                KeyValue::new("channel_id", channel_id.to_string()),
+                                KeyValue::new("user_id", key.user_id.to_string()),
+                            ],
+                        );
+                    }
+                })
+                .build();
+        }
+
+        meter
+            .u64_observable_gauge("bot_up")
+            .with_description("Bot process health: 1 while the process exports metrics")
+            .with_callback(|observer| observer.observe(1, &[]))
+            .build();
+
+        {
+            let m = metrics.clone();
+            meter
+                .u64_observable_gauge("uptime_seconds")
+                .with_description("Bot process uptime in seconds")
+                .with_unit("s")
+                .with_callback(move |observer| {
+                    observer.observe(m.start_time.elapsed().as_secs(), &[])
+                })
+                .build();
+        }
+
+        {
+            let m = metrics.clone();
+            meter
+                .i64_observable_gauge("last_voice_packet_timestamp_seconds")
+                .with_description("Unix timestamp in seconds of the last observed voice packet")
+                .with_unit("s")
+                .with_callback(move |observer| {
+                    let ms = m
+                        .last_voice_packet_time
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    observer.observe(ms / 1000, &[]);
+                })
+                .build();
+        }
+
+        {
+            let m = metrics.clone();
+            meter
+                .u64_observable_gauge("last_voice_packet_age_seconds")
+                .with_description("Seconds since the last observed voice packet")
+                .with_unit("s")
+                .with_callback(move |observer| {
+                    let last_ms = m
+                        .last_voice_packet_time
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if last_ms > 0 {
+                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        observer.observe(((now_ms - last_ms).max(0) / 1000) as u64, &[]);
+                    }
+                })
+                .build();
+        }
+
+        u64_gauge!(
             "process_rss_bytes",
             "RSS memory usage in bytes",
-            process_rss_bytes,
-            std::convert::identity
+            process_rss_bytes
+        );
+        u32_gauge!(
+            "process_open_fds",
+            "Open file descriptors",
+            process_open_fds
+        );
+        u32_gauge!(
+            "tokio_active_tasks",
+            "Tokio runtime active tasks",
+            tokio_active_tasks
+        );
+        u32_gauge!(
+            "grpc_active_streams",
+            "Current active gRPC dashboard streams",
+            grpc_active_streams
+        );
+        u32_gauge!(
+            "active_voice_connections",
+            "Current active voice connections",
+            active_voice_connections
+        );
+        u32_gauge!(
+            "active_recordings",
+            "Current active recordings",
+            active_recordings
         );
         guild_gauge!(
             "guild_active_recordings",
             "Number of active recordings per guild",
             active_recordings
         );
-        guild_gauge!(
-            "guild_ffmpeg_process_crashes",
-            "Number of ffmpeg process crashes per guild",
-            ffmpeg_process_crashes
+        channel_gauge!(
+            "channel_active_recordings",
+            "Number of active recordings per channel",
+            active_recordings
         );
-        gauge!(
+
+        u32_counter!(
             "commands_executed",
             "Total commands executed",
             commands_executed
         );
-        gauge!(
-            "active_voice_connections",
-            "Number of active voice connections",
-            active_voice_connections
+        u32_counter!(
+            "messages_received",
+            "Total regular messages received",
+            messages_received
         );
-        gauge!(
-            "active_recordings",
-            "Number of active recordings",
-            active_recordings
+        u64_counter!(
+            "voice_state_updates_received",
+            "Total Discord voice state updates received",
+            voice_state_updates_received
         );
-        gauge!(
+        u64_counter!(
+            "recordings_started",
+            "Total recording writers opened",
+            recordings_started
+        );
+        u64_counter!(
+            "recordings_finished",
+            "Total recording writers closed",
+            recordings_finished
+        );
+        u64_counter!(
+            "recording_finalize_errors",
+            "Total recording writer finalization failures",
+            recording_finalize_errors
+        );
+        u64_counter!(
             "audio_packets_received",
             "Total audio packets received",
-            audio_packets_received,
-            std::convert::identity
+            audio_packets_received
         );
-        gauge!(
-            "tokio_active_tasks",
-            "Tokio runtime active tasks",
-            tokio_active_tasks
-        );
-        gauge!(
+        u64_counter!(
             "audio_packets_dropped",
             "Total audio packets dropped globally",
-            audio_packets_dropped,
-            std::convert::identity
+            audio_packets_dropped
         );
-        guild_gauge!(
-            "guild_audio_packets_dropped",
-            "Number of audio packets dropped per guild",
-            audio_packets_dropped,
-            std::convert::identity
+        u32_counter!(
+            "ffmpeg_spawn_failures",
+            "Total ffmpeg/file writer spawn or setup failures",
+            ffmpeg_spawn_failures
         );
-        gauge!(
+        u32_counter!(
+            "ffmpeg_process_crashes",
+            "Total ffmpeg process crashes",
+            ffmpeg_process_crashes
+        );
+        u32_counter!(
             "gateway_reconnects",
             "Total Discord gateway reconnects",
             gateway_reconnects
         );
-        gauge!(
+        u32_counter!(
             "gateway_disconnects",
             "Total Discord gateway disconnects",
             gateway_disconnects
         );
-        gauge!(
+        u32_counter!(
             "driver_reconnects",
             "Total Songbird driver reconnects",
             driver_reconnects
         );
-        gauge!(
+        u32_counter!(
             "driver_disconnects",
             "Total Songbird driver disconnects",
             driver_disconnects
         );
+        u32_counter!(
+            "db_query_errors",
+            "Total database query errors",
+            db_query_errors
+        );
+        u32_counter!(
+            "db_insert_failures",
+            "Total database insert failures",
+            db_insert_failures
+        );
+
+        guild_counter!(
+            "guild_audio_packets_received",
+            "Total audio packets received per guild",
+            audio_packets_received,
+            std::convert::identity
+        );
+        channel_counter!(
+            "channel_audio_packets_received",
+            "Total audio packets received per channel",
+            audio_packets_received,
+            std::convert::identity
+        );
+        guild_counter!(
+            "guild_audio_packets_dropped",
+            "Total audio packets dropped per guild",
+            audio_packets_dropped,
+            std::convert::identity
+        );
+        channel_counter!(
+            "channel_audio_packets_dropped",
+            "Total audio packets dropped per channel",
+            audio_packets_dropped,
+            std::convert::identity
+        );
+        guild_counter!(
+            "guild_ffmpeg_spawn_failures",
+            "Total ffmpeg/file writer spawn or setup failures per guild",
+            ffmpeg_spawn_failures,
+            |v| v as u64
+        );
+        channel_counter!(
+            "channel_ffmpeg_spawn_failures",
+            "Total ffmpeg/file writer spawn or setup failures per channel",
+            ffmpeg_spawn_failures,
+            |v| v as u64
+        );
+        guild_counter!(
+            "guild_ffmpeg_process_crashes",
+            "Total ffmpeg process crashes per guild",
+            ffmpeg_process_crashes,
+            |v| v as u64
+        );
+        channel_counter!(
+            "channel_ffmpeg_process_crashes",
+            "Total ffmpeg process crashes per channel",
+            ffmpeg_process_crashes,
+            |v| v as u64
+        );
+    }
+
+    pub fn track_voice_presence(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        presence: Option<VoiceUserPresence>,
+    ) {
+        let key = VoiceUserKey { guild_id, user_id };
+        if let Some(presence) = presence {
+            self.voice_users.insert(key, presence);
+        } else {
+            self.voice_users.remove(&key);
+            self.active_recording_users.remove(&key);
+        }
+    }
+
+    pub fn track_recording_started(
+        &self,
+        guild_metrics: &GuildRecordingMetrics,
+        channel_metrics: &GuildRecordingMetrics,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+    ) {
+        self.active_recordings
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        guild_metrics
+            .active_recordings
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        channel_metrics
+            .active_recordings
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.recordings_started
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.active_recording_users
+            .insert(VoiceUserKey { guild_id, user_id }, channel_id);
+    }
+
+    pub fn track_recording_finished(
+        &self,
+        guild_metrics: &GuildRecordingMetrics,
+        channel_metrics: &GuildRecordingMetrics,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+        duration_seconds: f64,
+    ) {
+        self.active_recordings
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        guild_metrics
+            .active_recordings
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        channel_metrics
+            .active_recordings
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.recordings_finished
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.recording_duration_seconds.record(
+            duration_seconds.max(0.0),
+            &[
+                KeyValue::new("guild_id", guild_id.to_string()),
+                KeyValue::new("channel_id", channel_id.to_string()),
+            ],
+        );
+        self.active_recording_users
+            .remove(&VoiceUserKey { guild_id, user_id });
+    }
+
+    pub fn track_recording_finalize_error(&self) {
+        self.recording_finalize_errors
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn track_ffmpeg_spawn_failure(
+        &self,
+        guild_metrics: &GuildRecordingMetrics,
+        channel_metrics: &GuildRecordingMetrics,
+    ) {
+        self.ffmpeg_spawn_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        guild_metrics
+            .ffmpeg_spawn_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        channel_metrics
+            .ffmpeg_spawn_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn track_audio_packet_received(
+        &self,
+        guild_metrics: &GuildRecordingMetrics,
+        channel_metrics: &GuildRecordingMetrics,
+    ) {
+        self.audio_packets_received
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        guild_metrics
+            .audio_packets_received
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        channel_metrics
+            .audio_packets_received
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn track_last_voice_packet(
+        &self,
+        guild_metrics: &GuildRecordingMetrics,
+        channel_metrics: &GuildRecordingMetrics,
+        timestamp_ms: i64,
+    ) {
+        self.last_voice_packet_time
+            .store(timestamp_ms, std::sync::atomic::Ordering::Relaxed);
+        guild_metrics
+            .last_voice_packet_time
+            .store(timestamp_ms, std::sync::atomic::Ordering::Relaxed);
+        channel_metrics
+            .last_voice_packet_time
+            .store(timestamp_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn recording_duration_histogram() -> Histogram<f64> {
+        opentelemetry::global::meter(crate::config::SERVICE_NAME)
+            .f64_histogram("recording_duration_seconds")
+            .with_description("Finalized recording duration in seconds")
+            .with_unit("s")
+            .build()
     }
 
     /// Starts a background task to monitor process health (memory, FDs, active tasks).
@@ -264,12 +816,19 @@ impl Default for BotMetrics {
             voice_update_tx: voice_tx,
             user_start_times: dashmap::DashMap::new(),
             active_recordings: AtomicU32::new(0),
+            recordings_started: AtomicU64::new(0),
+            recordings_finished: AtomicU64::new(0),
+            recording_finalize_errors: AtomicU64::new(0),
             ffmpeg_spawn_failures: AtomicU32::new(0),
             ffmpeg_process_crashes: AtomicU32::new(0),
             audio_packets_received: AtomicU64::new(0),
             audio_packets_dropped: AtomicU64::new(0),
             last_voice_packet_time: AtomicI64::new(0),
+            recording_duration_seconds: Self::recording_duration_histogram(),
             guild_recording_metrics: dashmap::DashMap::new(),
+            channel_recording_metrics: dashmap::DashMap::new(),
+            voice_users: dashmap::DashMap::new(),
+            active_recording_users: dashmap::DashMap::new(),
             gateway_reconnects: AtomicU32::new(0),
             gateway_disconnects: AtomicU32::new(0),
             driver_reconnects: AtomicU32::new(0),

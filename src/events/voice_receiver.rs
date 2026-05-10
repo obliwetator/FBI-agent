@@ -18,7 +18,7 @@ use std::io::BufWriter;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::events::ogg_opus_writer::OggOpusWriter;
 
@@ -66,6 +66,7 @@ pub struct InnerReceiver {
     bot_user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
     metrics: Arc<crate::BotMetrics>,
     guild_metrics: Arc<crate::GuildRecordingMetrics>,
+    channel_metrics: Arc<crate::GuildRecordingMetrics>,
     pub last_voice_packet_time: AtomicI64,
     /// Wallclock millisecond when the first non-bot user joined this session.
     /// 0 = inactive. Used to pad new joiners' files with leading silence so
@@ -97,6 +98,7 @@ impl Receiver {
         metrics: Arc<crate::BotMetrics>,
     ) -> Self {
         let guild_metrics = metrics.guild_metrics(guild_id.get());
+        let channel_metrics = metrics.channel_metrics(guild_id.get(), channel_id.get());
         let inner = Arc::new(InnerReceiver {
             pool,
             ctx_main: ctx,
@@ -108,6 +110,7 @@ impl Receiver {
             channel_id,
             metrics,
             guild_metrics,
+            channel_metrics,
             last_voice_packet_time: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
             session_start_ms: AtomicI64::new(0),
             disconnected_at_ms: AtomicI64::new(0),
@@ -181,7 +184,7 @@ impl VoiceEventHandler for Receiver {
                 ..
             }) => {
                 let _ = async {
-                info!(
+                debug!(
                     "Speaking state update: user {:?} has SSRC {:?}, using {:?}",
                     user_id, ssrc, speaking,
                 );
@@ -220,7 +223,7 @@ impl VoiceEventHandler for Receiver {
 
                 if let Some(previous_ssrc) = previous_ssrc {
                     if previous_ssrc == *ssrc {
-                        info!("Writer already active for ssrc {}", ssrc);
+                        debug!("Writer already active for ssrc {}", ssrc);
                         return None;
                     }
 
@@ -294,7 +297,7 @@ impl VoiceEventHandler for Receiver {
                         // Single write-lock for the check-and-insert to avoid TOCTOU.
                         let mut writer_map = self.inner.ssrc_writer_hashmap.write().await;
                         if writer_map.contains_key(ssrc) {
-                            info!("Writer already active for ssrc {}", ssrc);
+                            debug!("Writer already active for ssrc {}", ssrc);
                         } else {
                             info!("New writer for ssrc {}", ssrc);
                             let now = chrono::Utc::now();
@@ -318,12 +321,10 @@ impl VoiceEventHandler for Receiver {
                                     error!("Failed to create file for ssrc {}: {}", ssrc, e);
                                     self.inner
                                         .metrics
-                                        .ffmpeg_spawn_failures
-                                        .fetch_add(1, Ordering::Relaxed);
-                                    self.inner
-                                        .guild_metrics
-                                        .ffmpeg_spawn_failures
-                                        .fetch_add(1, Ordering::Relaxed);
+                                        .track_ffmpeg_spawn_failure(
+                                            &self.inner.guild_metrics,
+                                            &self.inner.channel_metrics,
+                                        );
                                     return None;
                                 }
                             };
@@ -355,14 +356,13 @@ impl VoiceEventHandler for Receiver {
                             )
                             .await;
 
-                            self.inner
-                                .metrics
-                                .active_recordings
-                                .fetch_add(1, Ordering::Relaxed);
-                            self.inner
-                                .guild_metrics
-                                .active_recordings
-                                .fetch_add(1, Ordering::Relaxed);
+                            self.inner.metrics.track_recording_started(
+                                &self.inner.guild_metrics,
+                                &self.inner.channel_metrics,
+                                self.inner.guild_id.get(),
+                                self.inner.channel_id.get(),
+                                user_id.0,
+                            );
 
                             let _ = sqlx::query(
                                 "INSERT INTO voice_events_audit (guild_id, user_id, ssrc, event_type_id, details) VALUES ($1, $2, $3, $4, $5)"
@@ -380,7 +380,7 @@ impl VoiceEventHandler for Receiver {
                     }
                 }
                 None::<Event>
-            }.instrument(tracing::info_span!("SpeakingStateUpdate", ssrc = %ssrc, user_id = ?user_id)).await;
+            }.instrument(tracing::debug_span!("SpeakingStateUpdate", ssrc = %ssrc, user_id = ?user_id)).await;
             }
 
             Ctx::RtpPacket(_packet) => {
@@ -392,14 +392,11 @@ impl VoiceEventHandler for Receiver {
                     self.inner
                         .last_voice_packet_time
                         .store(now, Ordering::Relaxed);
-                    self.inner
-                        .metrics
-                        .last_voice_packet_time
-                        .store(now, Ordering::Relaxed);
-                    self.inner
-                        .guild_metrics
-                        .last_voice_packet_time
-                        .store(now, Ordering::Relaxed);
+                    self.inner.metrics.track_last_voice_packet(
+                        &self.inner.guild_metrics,
+                        &self.inner.channel_metrics,
+                        now,
+                    );
                 }
 
                 // Snapshot the active SSRCs (skip bots).
@@ -453,14 +450,10 @@ impl VoiceEventHandler for Receiver {
                     let mut rec = recording.lock().await;
                     let result = match opus_bytes.as_deref() {
                         Some(bytes) if !bytes.is_empty() => {
-                            self.inner
-                                .metrics
-                                .audio_packets_received
-                                .fetch_add(1, Ordering::Relaxed);
-                            self.inner
-                                .guild_metrics
-                                .audio_packets_received
-                                .fetch_add(1, Ordering::Relaxed);
+                            self.inner.metrics.track_audio_packet_received(
+                                &self.inner.guild_metrics,
+                                &self.inner.channel_metrics,
+                            );
                             rec.writer.write_packet(bytes)
                         }
                         _ => rec.writer.write_silence(1),
@@ -550,7 +543,7 @@ impl VoiceEventHandler for Receiver {
 
             Ctx::ClientDisconnect(ClientDisconnect { user_id }) => {
                 let _ = async {
-                    error!("client disconnected id: {}", user_id);
+                    info!("client disconnected id: {}", user_id);
 
                     let is_bot_ssrc = self
                         .inner
@@ -789,6 +782,7 @@ async fn finalize_writer_at(
 
     if let Err(e) = rec.writer.finish() {
         error!("Failed to finalize writer for ssrc {}: {}", ssrc, e);
+        inner.metrics.track_recording_finalize_error();
         let _ = sqlx::query(
             "INSERT INTO voice_events_audit (guild_id, user_id, ssrc, event_type_id, details) VALUES ($1, $2, $3, $4, $5)"
         )
@@ -801,18 +795,17 @@ async fn finalize_writer_at(
         .await;
     }
 
-    inner
-        .metrics
-        .active_recordings
-        .fetch_sub(1, Ordering::Relaxed);
-    inner
-        .guild_metrics
-        .active_recordings
-        .fetch_sub(1, Ordering::Relaxed);
-
     let time_elapsed = close_time
         .signed_duration_since(rec.start_time)
         .num_milliseconds();
+    inner.metrics.track_recording_finished(
+        &inner.guild_metrics,
+        &inner.channel_metrics,
+        inner.guild_id.get(),
+        inner.channel_id.get(),
+        rec.user_id,
+        time_elapsed as f64 / 1000.0,
+    );
     let last_person_in_channel = inner.user_id_hashmap.read().await.is_empty();
     // 2 = JOINED 3 = LAST
     let state = if last_person_in_channel { 3 } else { 2 };

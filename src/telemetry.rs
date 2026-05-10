@@ -34,7 +34,9 @@ pub fn init_telemetry() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let tracer = opentelemetry::global::tracer(crate::config::SERVICE_NAME);
 
-    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+    let telemetry = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
 
     let file_appender = tracing_appender::rolling::daily("logs", "fbi-agent.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);

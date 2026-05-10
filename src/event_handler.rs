@@ -369,7 +369,7 @@ impl EventHandler for Handler {
         _old_data: Option<serenity::model::prelude::CurrentUser>,
         _new: serenity::model::prelude::CurrentUser,
     ) {
-        info!("bot Updated. Old: {:#?}, New: {:#?}", _old_data, _new);
+        info!(user_id = %_new.id, username = %_new.name, "bot user updated");
     }
 
     async fn voice_server_update(
