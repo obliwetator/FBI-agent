@@ -169,7 +169,7 @@ impl Receiver {
 
 #[async_trait]
 impl VoiceEventHandler for Receiver {
-    #[tracing::instrument(skip_all, name = "receiver_act", fields(guild_id = %self.inner.guild_id))]
+    #[tracing::instrument(level = "trace",  skip_all, name = "receiver_act", fields(guild_id = %self.inner.guild_id))]
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
         use EventContext as Ctx;
         use tracing::Instrument;
@@ -191,6 +191,66 @@ impl VoiceEventHandler for Receiver {
                     return None;
                 };
 
+                let previous_bot_ssrc = {
+                    self.inner
+                        .bot_user_id_hashmap
+                        .read()
+                        .await
+                        .get(&user_id.0)
+                        .copied()
+                };
+                if let Some(previous_bot_ssrc) = previous_bot_ssrc {
+                    if previous_bot_ssrc != *ssrc {
+                        let mut bot_ssrcs = self.inner.bot_ssrcs.write().await;
+                        bot_ssrcs.remove(&previous_bot_ssrc);
+                        bot_ssrcs.insert(*ssrc);
+                        self.inner
+                            .bot_user_id_hashmap
+                            .write()
+                            .await
+                            .insert(user_id.0, *ssrc);
+                    }
+                    return None;
+                }
+
+                let (is_channel_empty, previous_ssrc) = {
+                    let users = self.inner.user_id_hashmap.read().await;
+                    (users.is_empty(), users.get(&user_id.0).copied())
+                };
+
+                if let Some(previous_ssrc) = previous_ssrc {
+                    if previous_ssrc == *ssrc {
+                        info!("Writer already active for ssrc {}", ssrc);
+                        return None;
+                    }
+
+                    let recording = {
+                        let mut writer_map = self.inner.ssrc_writer_hashmap.write().await;
+                        if let Some(recording) = writer_map.remove(&previous_ssrc) {
+                            writer_map.insert(*ssrc, recording.clone());
+                            Some(recording)
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(recording) = recording {
+                        self.inner
+                            .user_id_hashmap
+                            .write()
+                            .await
+                            .insert(user_id.0, *ssrc);
+
+                        let mut rec = recording.lock().await;
+                        rec.ssrc = *ssrc;
+                        info!(
+                            "Remapped active writer for user {} from ssrc {} to {}",
+                            user_id.0, previous_ssrc, ssrc
+                        );
+                        return None;
+                    }
+                }
+
                 let guild = match self.inner.ctx_main.cache.guild(self.inner.guild_id) {
                     Some(g) => g.to_owned(),
                     None => {
@@ -199,11 +259,18 @@ impl VoiceEventHandler for Receiver {
                     }
                 };
 
-                let member = match guild.member(&self.inner.ctx_main, user_id.0).await {
-                    Ok(m) => m,
-                    Err(e) => {
-                        error!("Failed to get member: {}", e);
-                        return None;
+                let member = match guild
+                    .members
+                    .get(&serenity::model::id::UserId::new(user_id.0))
+                    .cloned()
+                {
+                    Some(m) => m,
+                    None => match guild.member(&self.inner.ctx_main, user_id.0).await {
+                        Ok(m) => m.into_owned(),
+                        Err(e) => {
+                            error!("Failed to get member: {}", e);
+                            return None;
+                        }
                     }
                 };
 
@@ -215,19 +282,6 @@ impl VoiceEventHandler for Receiver {
                         .await
                         .insert(user_id.0, *ssrc);
                 } else {
-                    crate::database::user_names::observe(
-                        &self.inner.pool,
-                        self.inner.guild_id.get(),
-                        &member.user,
-                        Some(&member),
-                    )
-                    .await;
-
-                    let (is_channel_empty, previous_ssrc) = {
-                        let users = self.inner.user_id_hashmap.read().await;
-                        (users.is_empty(), users.get(&user_id.0).copied())
-                    };
-
                     {
                         self.inner
                             .user_id_hashmap
@@ -239,26 +293,6 @@ impl VoiceEventHandler for Receiver {
                     {
                         // Single write-lock for the check-and-insert to avoid TOCTOU.
                         let mut writer_map = self.inner.ssrc_writer_hashmap.write().await;
-                        if let Some(previous_ssrc) = previous_ssrc {
-                            if previous_ssrc == *ssrc {
-                                info!("Writer already active for ssrc {}", ssrc);
-                                return None;
-                            }
-
-                            if let Some(recording) = writer_map.remove(&previous_ssrc) {
-                                writer_map.insert(*ssrc, recording.clone());
-                                drop(writer_map);
-
-                                let mut rec = recording.lock().await;
-                                rec.ssrc = *ssrc;
-                                info!(
-                                    "Remapped active writer for user {} from ssrc {} to {}",
-                                    user_id.0, previous_ssrc, ssrc
-                                );
-                                return None;
-                            }
-                        }
-
                         if writer_map.contains_key(ssrc) {
                             info!("Writer already active for ssrc {}", ssrc);
                         } else {
@@ -311,6 +345,15 @@ impl VoiceEventHandler for Receiver {
                                 ssrc: *ssrc,
                             };
                             writer_map.insert(*ssrc, Arc::new(Mutex::new(recording)));
+                            drop(writer_map);
+
+                            crate::database::user_names::observe(
+                                &self.inner.pool,
+                                self.inner.guild_id.get(),
+                                &member.user,
+                                Some(&member),
+                            )
+                            .await;
 
                             self.inner
                                 .metrics

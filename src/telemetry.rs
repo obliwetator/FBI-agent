@@ -1,5 +1,6 @@
 use opentelemetry_sdk::Resource;
 use std::error::Error;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::{Layer, Registry, layer::SubscriberExt};
 
 pub fn init_telemetry() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -46,11 +47,13 @@ pub fn init_telemetry() -> Result<(), Box<dyn Error + Send + Sync>> {
     let file_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_writer(non_blocking)
+        .with_span_events(FmtSpan::NONE)
         .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
 
     let subscriber = Registry::default().with(telemetry).with(file_layer).with(
         tracing_subscriber::fmt::layer()
             .pretty()
+            .with_span_events(FmtSpan::NONE)
             .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
     );
 
