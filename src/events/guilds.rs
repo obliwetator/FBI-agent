@@ -52,9 +52,18 @@ pub async fn guild_member_removal(
 pub async fn guild_member_addition(
     _self: &Handler,
     _ctx: Context,
-    _new_member: serenity::model::guild::Member,
+    new_member: serenity::model::guild::Member,
 ) {
-    todo!()
+    if new_member.user.bot {
+        return;
+    }
+    crate::database::user_names::observe(
+        &_self.database,
+        new_member.guild_id.get(),
+        &new_member.user,
+        Some(&new_member),
+    )
+    .await;
 }
 
 pub async fn guild_member_update(
@@ -78,9 +87,20 @@ pub async fn guild_member_update(
 pub async fn guild_members_chunk(
     _self: &Handler,
     _ctx: Context,
-    _chunk: serenity::model::event::GuildMembersChunkEvent,
+    chunk: serenity::model::event::GuildMembersChunkEvent,
 ) {
-    todo!()
+    for member in chunk.members.into_values() {
+        if member.user.bot {
+            continue;
+        }
+        crate::database::user_names::observe(
+            &_self.database,
+            chunk.guild_id.get(),
+            &member.user,
+            Some(&member),
+        )
+        .await;
+    }
 }
 
 pub async fn guild_update(
