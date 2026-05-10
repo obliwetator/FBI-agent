@@ -2,7 +2,7 @@ use serenity::{
     client::Context,
     model::channel::{Message, MessageType},
 };
-use tracing::{error, info, warn};
+use tracing::{error, warn};
 
 use crate::event_handler::Handler;
 

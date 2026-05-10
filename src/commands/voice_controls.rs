@@ -7,7 +7,6 @@ use crate::events::voice_receiver::CLIPS_FILE_PATH;
 use serenity::model::prelude::GuildId;
 use songbird::Songbird;
 use sqlx::{Pool, Postgres};
-use tracing::info;
 
 pub async fn play_clip(
     pool: &Pool<Postgres>,

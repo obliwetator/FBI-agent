@@ -6,7 +6,7 @@ use serenity::{
     },
     client::Context,
 };
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::event_handler::Handler;
 

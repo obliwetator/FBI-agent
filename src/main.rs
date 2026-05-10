@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, error::Error, sync::Arc};
+use std::{collections::HashMap, error::Error, sync::Arc};
 
 use serenity::{all::ApplicationId, client::Cache, http::Http, prelude::*};
 use songbird::{Config, SerenityInit, driver::DecodeMode};
@@ -71,8 +71,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     crate::telemetry::init_telemetry()?;
 
-    // create relevant folders
-    let path = env::current_dir()?;
     if !std::path::Path::new(events::voice_receiver::RECORDING_FILE_PATH).exists() {
         tokio::fs::create_dir_all(events::voice_receiver::RECORDING_FILE_PATH).await?;
     }
