@@ -9,7 +9,6 @@ use crate::event_handler::Handler;
 pub async fn message(_self: &Handler, ctx: Context, msg: Message) {
     // let pool = db_helper::get_pool_from_ctx(&ctx).await;
     // db_helper::get_channels(&pool).await;
-    // info!("message is {}", msg.content);
     match msg.kind {
         MessageType::Regular => {
             let data_read = ctx.data.read().await;
@@ -79,7 +78,7 @@ pub async fn message(_self: &Handler, ctx: Context, msg: Message) {
             warn!("Unhandled message type: GuildApplicationPremiumSubscription");
         }
         MessageType::Unknown(_) => {
-            info!("unkown type");
+            warn!("unkown type");
         }
         _ => {
             error!("unkown type");

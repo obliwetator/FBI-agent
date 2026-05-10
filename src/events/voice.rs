@@ -9,7 +9,38 @@ use serenity::{
 use songbird::CoreEvent;
 use sqlx::{Pool, Postgres};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+// Voice state event type IDs match rows seeded in
+// migrations/20260505000001_create_voice_state_events.up.sql.
+const EVT_SERVER_MUTE: i32 = 1;
+const EVT_SERVER_UNMUTE: i32 = 2;
+const EVT_SERVER_DEAFEN: i32 = 3;
+const EVT_SERVER_UNDEAFEN: i32 = 4;
+const EVT_SELF_MUTE: i32 = 5;
+const EVT_SELF_UNMUTE: i32 = 6;
+const EVT_SELF_DEAFEN: i32 = 7;
+const EVT_SELF_UNDEAFEN: i32 = 8;
+const EVT_SUPPRESS_ON: i32 = 9;
+const EVT_SUPPRESS_OFF: i32 = 10;
+const EVT_STREAM_START: i32 = 11;
+const EVT_STREAM_STOP: i32 = 12;
+const EVT_VIDEO_ON: i32 = 13;
+const EVT_VIDEO_OFF: i32 = 14;
+const EVT_CHANNEL_JOIN: i32 = 15;
+const EVT_CHANNEL_LEAVE: i32 = 16;
+const EVT_CHANNEL_SWITCH: i32 = 17;
+pub(super) const EVT_RECORDING_PAUSE: i32 = 18;
+pub(super) const EVT_RECORDING_RESUME: i32 = 19;
+
+const LOG_VOICE_STATE_CHANGES: bool = false;
+
+const VOICE_FLAG_SERVER_MUTE: u8 = 1 << 0;
+const VOICE_FLAG_SERVER_DEAF: u8 = 1 << 1;
+const VOICE_FLAG_SELF_MUTE: u8 = 1 << 2;
+const VOICE_FLAG_SELF_DEAF: u8 = 1 << 3;
+const VOICE_FLAG_SUPPRESS: u8 = 1 << 4;
+const VOICE_FLAG_VIDEO: u8 = 1 << 5;
 
 pub async fn voice_server_update(
     _self: &Handler,
@@ -18,56 +49,229 @@ pub async fn voice_server_update(
 ) {
 }
 
-fn log_voice_state_changes(
-    old: &serenity::model::prelude::VoiceState,
-    new_state: &serenity::model::prelude::VoiceState,
+pub(super) async fn insert_voice_event(
+    pool: &Pool<Postgres>,
+    guild_id: i64,
+    channel_id: Option<i64>,
+    user_id: i64,
+    event_type_id: i32,
 ) {
-    if old.deaf != new_state.deaf {
-        info!(
-            "User server deafened changed: {} -> {}",
-            old.deaf, new_state.deaf
-        );
+    if let Err(err) = sqlx::query!(
+        "INSERT INTO voice_state_events (guild_id, channel_id, user_id, event_type_id) \
+         VALUES ($1, $2, $3, $4)",
+        guild_id,
+        channel_id,
+        user_id,
+        event_type_id
+    )
+    .execute(pool)
+    .await
+    {
+        warn!("Failed to insert voice_state_event: {}", err);
     }
-    if old.mute != new_state.mute {
-        info!(
-            "User server muted changed: {} -> {}",
-            old.mute, new_state.mute
-        );
+}
+
+struct VoiceFlagEvent {
+    label: &'static str,
+    enabled_event_type_id: i32,
+    disabled_event_type_id: i32,
+}
+
+fn voice_state_flags(state: &serenity::model::prelude::VoiceState) -> u8 {
+    let mut flags = 0;
+    if state.mute {
+        flags |= VOICE_FLAG_SERVER_MUTE;
     }
-    if old.self_deaf != new_state.self_deaf {
-        info!(
-            "User self deafened changed: {} -> {}",
-            old.self_deaf, new_state.self_deaf
-        );
+    if state.deaf {
+        flags |= VOICE_FLAG_SERVER_DEAF;
     }
-    if old.self_mute != new_state.self_mute {
-        info!(
-            "User self muted changed: {} -> {}",
-            old.self_mute, new_state.self_mute
-        );
+    if state.self_mute {
+        flags |= VOICE_FLAG_SELF_MUTE;
     }
-    if old.self_stream != new_state.self_stream {
-        info!(
-            "User stream status changed: {:?} -> {:?}",
-            old.self_stream, new_state.self_stream
-        );
+    if state.self_deaf {
+        flags |= VOICE_FLAG_SELF_DEAF;
     }
-    if old.self_video != new_state.self_video {
-        info!(
-            "User video status changed: {} -> {}",
-            old.self_video, new_state.self_video
-        );
+    if state.suppress {
+        flags |= VOICE_FLAG_SUPPRESS;
     }
-    if old.suppress != new_state.suppress {
-        info!(
-            "User suppress status changed: {} -> {}",
-            old.suppress, new_state.suppress
-        );
+    if state.self_video {
+        flags |= VOICE_FLAG_VIDEO;
     }
-    if old.request_to_speak_timestamp != new_state.request_to_speak_timestamp {
+    flags
+}
+
+fn voice_flag_event(flag: u8) -> Option<VoiceFlagEvent> {
+    match flag {
+        VOICE_FLAG_SERVER_MUTE => Some(VoiceFlagEvent {
+            label: "User server muted changed",
+            enabled_event_type_id: EVT_SERVER_MUTE,
+            disabled_event_type_id: EVT_SERVER_UNMUTE,
+        }),
+        VOICE_FLAG_SERVER_DEAF => Some(VoiceFlagEvent {
+            label: "User server deafened changed",
+            enabled_event_type_id: EVT_SERVER_DEAFEN,
+            disabled_event_type_id: EVT_SERVER_UNDEAFEN,
+        }),
+        VOICE_FLAG_SELF_MUTE => Some(VoiceFlagEvent {
+            label: "User self muted changed",
+            enabled_event_type_id: EVT_SELF_MUTE,
+            disabled_event_type_id: EVT_SELF_UNMUTE,
+        }),
+        VOICE_FLAG_SELF_DEAF => Some(VoiceFlagEvent {
+            label: "User self deafened changed",
+            enabled_event_type_id: EVT_SELF_DEAFEN,
+            disabled_event_type_id: EVT_SELF_UNDEAFEN,
+        }),
+        VOICE_FLAG_SUPPRESS => Some(VoiceFlagEvent {
+            label: "User suppress status changed",
+            enabled_event_type_id: EVT_SUPPRESS_ON,
+            disabled_event_type_id: EVT_SUPPRESS_OFF,
+        }),
+        VOICE_FLAG_VIDEO => Some(VoiceFlagEvent {
+            label: "User video status changed",
+            enabled_event_type_id: EVT_VIDEO_ON,
+            disabled_event_type_id: EVT_VIDEO_OFF,
+        }),
+        _ => None,
+    }
+}
+
+async fn record_changed_voice_flag_events(
+    pool: &Pool<Postgres>,
+    guild_id: i64,
+    channel_id: Option<i64>,
+    user_id: i64,
+    log_changes: bool,
+    old_flags: u8,
+    new_flags: u8,
+) {
+    let mut changed_flags = old_flags ^ new_flags;
+    while changed_flags != 0 {
+        let flag = 1u8 << changed_flags.trailing_zeros();
+        changed_flags &= !flag;
+
+        let Some(event) = voice_flag_event(flag) else {
+            continue;
+        };
+        let old_value = old_flags & flag != 0;
+        let new_value = new_flags & flag != 0;
+
+        if log_changes {
+            info!("{}: {} -> {}", event.label, old_value, new_value);
+        }
+
+        insert_voice_event(
+            pool,
+            guild_id,
+            channel_id,
+            user_id,
+            if new_value {
+                event.enabled_event_type_id
+            } else {
+                event.disabled_event_type_id
+            },
+        )
+        .await;
+    }
+}
+
+async fn record_voice_events(
+    pool: &Pool<Postgres>,
+    old: Option<&serenity::model::prelude::VoiceState>,
+    new: &serenity::model::prelude::VoiceState,
+    log_changes: bool,
+) {
+    let Some(guild_id) = new.guild_id.map(|g| g.get() as i64) else {
+        return;
+    };
+    let user_id = new.user_id.get() as i64;
+    let new_channel = new.channel_id.map(|c| c.get() as i64);
+
+    // Channel transition events.
+    match (old.and_then(|o| o.channel_id), new.channel_id) {
+        (None, Some(new_ch)) => {
+            if log_changes {
+                info!("User joined voice channel: {}", new_ch);
+            }
+            insert_voice_event(
+                pool,
+                guild_id,
+                Some(new_ch.get() as i64),
+                user_id,
+                EVT_CHANNEL_JOIN,
+            )
+            .await;
+        }
+        (Some(old_ch), None) => {
+            if log_changes {
+                info!("User left voice channel: {}", old_ch);
+            }
+            insert_voice_event(
+                pool,
+                guild_id,
+                Some(old_ch.get() as i64),
+                user_id,
+                EVT_CHANNEL_LEAVE,
+            )
+            .await;
+        }
+        (Some(old_ch), Some(new_ch)) if old_ch != new_ch => {
+            if log_changes {
+                info!("User switched voice channels: {} -> {}", old_ch, new_ch);
+            }
+            insert_voice_event(
+                pool,
+                guild_id,
+                Some(new_ch.get() as i64),
+                user_id,
+                EVT_CHANNEL_SWITCH,
+            )
+            .await;
+        }
+        _ => {}
+    }
+
+    // Per-field diffs require a previous state.
+    let Some(old) = old else { return };
+
+    record_changed_voice_flag_events(
+        pool,
+        guild_id,
+        new_channel,
+        user_id,
+        log_changes,
+        voice_state_flags(old),
+        voice_state_flags(new),
+    )
+    .await;
+
+    let old_streaming = old.self_stream.unwrap_or(false);
+    let new_streaming = new.self_stream.unwrap_or(false);
+    if old_streaming != new_streaming {
+        if log_changes {
+            info!(
+                "User stream status changed: {:?} -> {:?}",
+                old.self_stream, new.self_stream
+            );
+        }
+        insert_voice_event(
+            pool,
+            guild_id,
+            new_channel,
+            user_id,
+            if new_streaming {
+                EVT_STREAM_START
+            } else {
+                EVT_STREAM_STOP
+            },
+        )
+        .await;
+    }
+
+    if log_changes && old.request_to_speak_timestamp != new.request_to_speak_timestamp {
         info!(
             "User request to speak changed: {:?} -> {:?}",
-            old.request_to_speak_timestamp, new_state.request_to_speak_timestamp
+            old.request_to_speak_timestamp, new.request_to_speak_timestamp
         );
     }
 }
@@ -78,6 +282,22 @@ pub async fn voice_state_update(
     old_state: Option<serenity::model::prelude::VoiceState>,
     new_state: serenity::model::prelude::VoiceState,
 ) {
+    // Persist voice events for non-bot users (timeline overlay on recordings).
+    let is_bot = new_state
+        .member
+        .as_ref()
+        .map(|m| m.user.bot)
+        .unwrap_or(false);
+    if !is_bot {
+        record_voice_events(
+            &_self.database,
+            old_state.as_ref(),
+            &new_state,
+            LOG_VOICE_STATE_CHANGES,
+        )
+        .await;
+    }
+
     // Notify the dashboard stream of any user voice state changes
     {
         let data_read = ctx.data.read().await;
@@ -121,7 +341,6 @@ pub async fn voice_state_update(
         };
         if member.user.bot {
             // Ignore bots
-            info!("bot");
             return;
         }
 
@@ -139,11 +358,9 @@ pub async fn voice_state_update(
             // We don't care about any events at the moment
             if new_channel_id == old_channel_id {
                 // An action happened that was NOT switching channels.
-                log_voice_state_changes(&old, &new_state);
                 return;
             } else {
                 // user switched channels
-                info!("user switched channels");
             }
         }
 
@@ -232,7 +449,6 @@ async fn handle_no_people_in_channel(
 
             // No Human users left, just the bot is left
             if members.is_empty() {
-                // info!("No more human users left. Leaving channel");
                 return true;
             } else {
                 // trace!("Human users still in channel.");
@@ -282,7 +498,6 @@ async fn get_channel_with_most_members(
         if let Some(afk_channel_id) = afk_channel_id_option {
             // Ignore channels that are meant for afk
             if afk_channel_id == channel_id.get() {
-                info!("Ignore AFK channel");
                 continue;
             }
         }
@@ -324,8 +539,6 @@ async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
             let _ = metrics.update_tx.send(());
         }
     }
-
-    info!("Left the voice channel");
 }
 
 pub async fn connect_to_voice_channel(
@@ -335,7 +548,6 @@ pub async fn connect_to_voice_channel(
     channel_id: ChannelId,
     user_id: u64,
 ) {
-    info!("Connecting to voice channel");
     let Some(manager) = songbird::get(ctx).await else {
         error!("Songbird manager missing while connecting to voice channel");
         return;
@@ -347,11 +559,8 @@ pub async fn connect_to_voice_channel(
         let current = arc_call.lock().await.current_channel();
 
         match current {
-            Some(ch) if ch.0.get() == channel_id.get() => {
-                info!("already in channel");
-            }
+            Some(ch) if ch.0.get() == channel_id.get() => {}
             Some(ch) => {
-                info!("Switching channels");
                 join_ch(
                     pool,
                     manager,
@@ -423,7 +632,6 @@ async fn join_ch(
         match result {
             Ok(join) => match join.await {
                 Ok(()) => {
-                    info!("Joined {}", channel_id);
                     record_active_voice_connection(ctx).await;
                 }
                 Err(err) => {
@@ -446,8 +654,6 @@ async fn join_ch(
     let result_handler_lock = manager.join(guild_id, channel_id).await;
     match result_handler_lock {
         Ok(_) => {
-            info!("Joined {}", channel_id);
-
             // switching channels. Don't re-register. Cleanup
             info!("Clean up switching chanels");
         }

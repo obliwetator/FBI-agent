@@ -73,7 +73,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // create relevant folders
     let path = env::current_dir()?;
-    info!("{}", path.display());
     if !std::path::Path::new(events::voice_receiver::RECORDING_FILE_PATH).exists() {
         tokio::fs::create_dir_all(events::voice_receiver::RECORDING_FILE_PATH).await?;
     }

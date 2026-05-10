@@ -20,7 +20,7 @@ use serenity::{
 };
 
 use sqlx::{Pool, Postgres};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{database, events, get_lock_read};
 
@@ -88,7 +88,6 @@ impl EventHandler for Handler {
     }
 
     async fn resume(&self, _ctx: Context, _: serenity::model::event::ResumedEvent) {
-        info!("Resumed");
         let data_read = _ctx.data.read().await;
         if let Some(metrics) = data_read.get::<crate::BotMetricsKey>() {
             metrics
@@ -352,7 +351,7 @@ impl EventHandler for Handler {
         )
         .await
         {
-            info!("Cannot register global slash commands: {}", why);
+            warn!("Cannot register global slash commands: {}", why);
         }
     }
 
