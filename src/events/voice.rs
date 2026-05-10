@@ -1,14 +1,11 @@
 use crate::{event_handler::Handler, events::voice_receiver::Receiver, get_lock_read};
 use serenity::{
     client::Context,
-    model::{
-        id::{ChannelId, GuildId},
-        prelude::Member,
-    },
+    model::id::{ChannelId, GuildId},
 };
 use songbird::CoreEvent;
 use sqlx::{Pool, Postgres};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tracing::{error, info, warn};
 
 // Voice state event type IDs match rows seeded in
@@ -34,6 +31,7 @@ pub(super) const EVT_RECORDING_PAUSE: i32 = 18;
 pub(super) const EVT_RECORDING_RESUME: i32 = 19;
 
 const LOG_VOICE_STATE_CHANGES: bool = false;
+const EMPTY_CHANNEL_LEAVE_DEBOUNCE: Duration = Duration::from_secs(3);
 
 const VOICE_FLAG_SERVER_MUTE: u8 = 1 << 0;
 const VOICE_FLAG_SERVER_DEAF: u8 = 1 << 1;
@@ -363,9 +361,8 @@ pub async fn voice_state_update(
             return;
         }
 
-        let leave = handle_no_people_in_channel(&new_state, &ctx, &old_state, member).await;
-        if leave {
-            leave_voice_channel(&ctx, guild_id).await;
+        if let Some(channel_id) = empty_channel_candidate(&new_state, &ctx, &old_state).await {
+            schedule_leave_if_still_empty(ctx.clone(), guild_id, channel_id);
             return;
         }
 
@@ -387,7 +384,10 @@ pub async fn voice_state_update(
             match get_channel_with_most_members(&ctx, &new_state).await {
                 Some(value) => value,
                 None => {
-                    leave_voice_channel(&ctx, guild_id).await;
+                    warn!(
+                        guild_id = guild_id.get(),
+                        "Skipping voice join because channel membership could not be inspected"
+                    );
                     return;
                 }
             };
@@ -408,74 +408,118 @@ pub async fn voice_state_update(
     }
 }
 
-// If no people are in the current channels we are safe to leave
-async fn handle_no_people_in_channel(
+// If no humans remain, schedule a delayed re-check before leaving.
+async fn empty_channel_candidate(
     new_state: &serenity::model::prelude::VoiceState,
     ctx: &Context,
     old_state: &Option<serenity::model::prelude::VoiceState>,
-    member: &Member,
-) -> bool {
+) -> Option<ChannelId> {
     if new_state.channel_id.is_none() {
         // Someone left the channel
 
-        // Check if the BOT has left the channel
-        if member.user.id == ctx.cache.current_user().id {
-            // From testing this will never trigger because the bot is disconnected before an event is received
-            // Check if the our application was kicked
-            info!("bot was kicked/left");
-            if let Some(guild_id) = new_state.guild_id {
-                leave_voice_channel(ctx, guild_id).await;
-            } else {
-                error!("Bot voice leave event had no guild id");
-            }
-            return true;
-        }
-
-        // Check if that person was the last HUMAN user to leave the channel
-        // TODO: There can be other people in different channels. Check for this
-
         // get the channel id that user was in before disconnecting
         if let Some(channel_id) = old_state.as_ref().and_then(|s| s.channel_id) {
-            let current_channel = match channel_id.to_channel(&ctx).await {
-                Ok(ch) => ch,
+            match human_member_count(ctx, channel_id).await {
+                Ok(0) => return Some(channel_id),
+                Ok(_) => return None,
                 Err(err) => {
-                    error!("Could not resolve current channel: {}", err);
-                    return false;
+                    warn!(
+                        channel_id = channel_id.get(),
+                        "Could not inspect channel before scheduling leave: {}", err
+                    );
+                    return None;
                 }
-            };
-
-            let guild_channel = match current_channel.guild() {
-                Some(gc) => gc,
-                None => {
-                    error!("Not a guild channel");
-                    return false;
-                }
-            };
-
-            let vec = match guild_channel.members(ctx) {
-                Ok(m) => m,
-                Err(err) => {
-                    error!("Could not get channel members: {}", err);
-                    return false;
-                }
-            };
-            // Get all users in the channel
-            let members: Vec<Member> = vec
-                .into_iter()
-                // Don't include bots
-                .filter(|f| !f.user.bot)
-                .collect();
-
-            // No Human users left, just the bot is left
-            if members.is_empty() {
-                return true;
-            } else {
-                // trace!("Human users still in channel.");
-                return false;
             }
         }
     }
-    false
+    None
+}
+
+async fn human_member_count(ctx: &Context, channel_id: ChannelId) -> Result<usize, String> {
+    let current_channel = channel_id
+        .to_channel(ctx)
+        .await
+        .map_err(|err| format!("could not resolve channel: {}", err))?;
+
+    let guild_channel = current_channel
+        .guild()
+        .ok_or_else(|| "not a guild channel".to_string())?;
+
+    let mut members = guild_channel
+        .members(ctx)
+        .map_err(|err| format!("could not get channel members: {}", err))?;
+
+    members.retain(|member| !member.user.bot);
+    Ok(members.len())
+}
+
+fn schedule_leave_if_still_empty(ctx: Context, guild_id: GuildId, channel_id: ChannelId) {
+    tokio::spawn(async move {
+        info!(
+            guild_id = guild_id.get(),
+            channel_id = channel_id.get(),
+            "empty channel leave scheduled"
+        );
+
+        tokio::time::sleep(EMPTY_CHANNEL_LEAVE_DEBOUNCE).await;
+
+        let Some(manager) = songbird::get(&ctx).await else {
+            error!("Songbird manager missing while rechecking empty voice channel");
+            return;
+        };
+        let manager = manager.clone();
+
+        let Some(call) = manager.get(guild_id) else {
+            info!(
+                guild_id = guild_id.get(),
+                channel_id = channel_id.get(),
+                "empty channel leave cancelled: bot moved/disconnected"
+            );
+            return;
+        };
+
+        let current_channel = call
+            .lock()
+            .await
+            .current_channel()
+            .map(|channel| channel.0.get());
+        if current_channel != Some(channel_id.get()) {
+            info!(
+                guild_id = guild_id.get(),
+                channel_id = channel_id.get(),
+                current_channel = current_channel,
+                "empty channel leave cancelled: bot moved/disconnected"
+            );
+            return;
+        }
+
+        match human_member_count(&ctx, channel_id).await {
+            Ok(0) => {
+                info!(
+                    guild_id = guild_id.get(),
+                    channel_id = channel_id.get(),
+                    "empty channel leave confirmed"
+                );
+                leave_voice_channel(&ctx, guild_id).await;
+            }
+            Ok(count) => {
+                info!(
+                    guild_id = guild_id.get(),
+                    channel_id = channel_id.get(),
+                    humans = count,
+                    "empty channel leave cancelled: humans returned"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    guild_id = guild_id.get(),
+                    channel_id = channel_id.get(),
+                    "empty channel leave cancelled: could not inspect channel: {}",
+                    err
+                );
+            }
+        }
+    });
 }
 
 async fn get_channel_with_most_members(
@@ -521,19 +565,19 @@ async fn get_channel_with_most_members(
             }
         }
         if let serenity::model::prelude::ChannelType::Voice = guild_channel.kind {
-            let count = match guild_channel.members(ctx) {
-                Ok(mut ok) => {
-                    ok.retain(|f| !f.user.bot);
-                    ok
-                }
-                Err(_) => {
-                    error!("This should not trigger");
+            let count = match human_member_count(ctx, channel_id).await {
+                Ok(count) => count,
+                Err(err) => {
+                    warn!(
+                        channel_id = channel_id.get(),
+                        "Could not inspect voice channel members: {}", err
+                    );
                     return None;
                 }
             };
 
-            if count.len() > highest_channel_len {
-                highest_channel_len = count.len();
+            if count > highest_channel_len {
+                highest_channel_len = count;
                 highest_channel_id = guild_channel.id;
             }
         }
