@@ -306,6 +306,25 @@ pub async fn voice_state_update(
 
             // Track user start times
             let user_id = new_state.user_id.get();
+            if let Some(guild_id) = new_state.guild_id {
+                metrics.track_voice_presence(
+                    guild_id.get(),
+                    user_id,
+                    new_state
+                        .channel_id
+                        .map(|channel_id| crate::VoiceUserPresence {
+                            channel_id: channel_id.get(),
+                            is_bot,
+                            server_mute: new_state.mute,
+                            server_deaf: new_state.deaf,
+                            self_mute: new_state.self_mute,
+                            self_deaf: new_state.self_deaf,
+                            suppress: new_state.suppress,
+                            streaming: new_state.self_stream.unwrap_or(false),
+                            video: new_state.self_video,
+                        }),
+                );
+            }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)

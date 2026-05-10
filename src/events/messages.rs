@@ -2,7 +2,7 @@ use serenity::{
     client::Context,
     model::channel::{Message, MessageType},
 };
-use tracing::{error, warn};
+use tracing::{debug, warn};
 
 use crate::event_handler::Handler;
 
@@ -36,52 +36,52 @@ pub async fn message(_self: &Handler, ctx: Context, msg: Message) {
         MessageType::NitroTier3 => {}
         MessageType::PinsAdd => {}
         MessageType::GuildDiscoveryGracePeriodInitialWarning => {
-            warn!("Unhandled message type: GuildDiscoveryGracePeriodInitialWarning");
+            debug!("Unhandled message type: GuildDiscoveryGracePeriodInitialWarning");
         }
         MessageType::GuildDiscoveryGracePeriodFinalWarning => {
-            warn!("Unhandled message type: GuildDiscoveryGracePeriodFinalWarning");
+            debug!("Unhandled message type: GuildDiscoveryGracePeriodFinalWarning");
         }
         MessageType::ThreadCreated => {
-            warn!("Unhandled message type: ThreadCreated");
+            debug!("Unhandled message type: ThreadCreated");
         }
         MessageType::ChatInputCommand => {
             // info!("slash command message: {:#?}", msg);
         }
         MessageType::ThreadStarterMessage => {
-            warn!("Unhandled message type: ThreadStarterMessage");
+            debug!("Unhandled message type: ThreadStarterMessage");
         }
         MessageType::ContextMenuCommand => {
-            warn!("Unhandled message type: ContextMenuCommand");
+            debug!("Unhandled message type: ContextMenuCommand");
         }
         MessageType::AutoModAction => {
-            warn!("Unhandled message type: AutoModAction");
+            debug!("Unhandled message type: AutoModAction");
         }
         MessageType::RoleSubscriptionPurchase => {
-            warn!("Unhandled message type: RoleSubscriptionPurchase");
+            debug!("Unhandled message type: RoleSubscriptionPurchase");
         }
         MessageType::InteractionPremiumUpsell => {
-            warn!("Unhandled message type: InteractionPremiumUpsell");
+            debug!("Unhandled message type: InteractionPremiumUpsell");
         }
         MessageType::StageStart => {
-            warn!("Unhandled message type: StageStart");
+            debug!("Unhandled message type: StageStart");
         }
         MessageType::StageEnd => {
-            warn!("Unhandled message type: StageEnd");
+            debug!("Unhandled message type: StageEnd");
         }
         MessageType::StageSpeaker => {
-            warn!("Unhandled message type: StageSpeaker");
+            debug!("Unhandled message type: StageSpeaker");
         }
         MessageType::StageTopic => {
-            warn!("Unhandled message type: StageTopic");
+            debug!("Unhandled message type: StageTopic");
         }
         MessageType::GuildApplicationPremiumSubscription => {
-            warn!("Unhandled message type: GuildApplicationPremiumSubscription");
+            debug!("Unhandled message type: GuildApplicationPremiumSubscription");
         }
         MessageType::Unknown(_) => {
-            warn!("unkown type");
+            debug!("unknown message type");
         }
         _ => {
-            error!("unkown type");
+            debug!("unhandled message type");
         }
     }
 }
