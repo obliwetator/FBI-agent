@@ -8,8 +8,8 @@ use sqlx::{Pool, Postgres};
 use std::{sync::Arc, time::Duration};
 use tracing::{error, info, warn};
 
-// Voice state event type IDs match rows seeded in
-// migrations/20260505000001_create_voice_state_events.up.sql.
+// Voice state event type IDs match rows seeded in the voice_state_event_types
+// migrations.
 const EVT_SERVER_MUTE: i32 = 1;
 const EVT_SERVER_UNMUTE: i32 = 2;
 const EVT_SERVER_DEAFEN: i32 = 3;
@@ -29,6 +29,8 @@ const EVT_CHANNEL_LEAVE: i32 = 16;
 const EVT_CHANNEL_SWITCH: i32 = 17;
 pub(super) const EVT_RECORDING_PAUSE: i32 = 18;
 pub(super) const EVT_RECORDING_RESUME: i32 = 19;
+pub(super) const EVT_USER_RECORDING_PAUSE: i32 = 20;
+pub(super) const EVT_USER_RECORDING_RESUME: i32 = 21;
 
 const LOG_VOICE_STATE_CHANGES: bool = false;
 const EMPTY_CHANNEL_LEAVE_DEBOUNCE: Duration = Duration::from_secs(3);

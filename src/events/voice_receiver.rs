@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufWriter;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
@@ -25,6 +25,7 @@ use crate::events::ogg_opus_writer::OggOpusWriter;
 pub const RECORDING_FILE_PATH: &str = RECORDING_ROOT;
 pub const CLIPS_FILE_PATH: &str = CLIPS_ROOT;
 const RECOVERABLE_DISCONNECT_TIMEOUT_MS: u64 = 60_000;
+const USER_REJOIN_RESUME_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 // Without this only way to test if pray discord randomly disconncts our bot. Need to manually toggle
 // CAVEAT: this includes bot self disconnects
 // TODO: Remote toggle for easier testing. No need to recompile
@@ -50,6 +51,14 @@ struct UserRecording {
 }
 
 #[derive(Clone)]
+struct PausedRecording {
+    recording: Arc<Mutex<UserRecording>>,
+    ssrc: u32,
+    paused_at: chrono::DateTime<chrono::Utc>,
+    token: u64,
+}
+
+#[derive(Clone)]
 pub struct Receiver {
     inner: Arc<InnerReceiver>,
 }
@@ -62,6 +71,8 @@ pub struct InnerReceiver {
     /// Active per-user recordings keyed by SSRC.
     ssrc_writer_hashmap: Arc<RwLock<HashMap<u32, Arc<Mutex<UserRecording>>>>>,
     user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
+    paused_recordings: Arc<RwLock<HashMap<u64, PausedRecording>>>,
+    paused_recording_token: AtomicU64,
     bot_ssrcs: Arc<RwLock<HashSet<u32>>>,
     bot_user_id_hashmap: Arc<RwLock<HashMap<u64, u32>>>,
     metrics: Arc<crate::BotMetrics>,
@@ -104,6 +115,8 @@ impl Receiver {
             ctx_main: ctx,
             user_id_hashmap: Arc::new(RwLock::new(HashMap::new())),
             ssrc_writer_hashmap: Arc::new(RwLock::new(HashMap::new())),
+            paused_recordings: Arc::new(RwLock::new(HashMap::new())),
+            paused_recording_token: AtomicU64::new(1),
             bot_ssrcs: Arc::new(RwLock::new(HashSet::new())),
             bot_user_id_hashmap: Arc::new(RwLock::new(HashMap::new())),
             guild_id,
@@ -285,6 +298,10 @@ impl VoiceEventHandler for Receiver {
                         .await
                         .insert(user_id.0, *ssrc);
                 } else {
+                    if resume_paused_recording(&self.inner, user_id.0, *ssrc).await {
+                        return None;
+                    }
+
                     {
                         self.inner
                             .user_id_hashmap
@@ -570,7 +587,7 @@ impl VoiceEventHandler for Receiver {
                         }
                     };
 
-                    finalize_writer(&self.inner, ssrc, VoiceEventType::WriterClose).await;
+                    pause_recording_for_rejoin(&self.inner, user_id.0, ssrc).await;
                     None::<Event>
                 }
                 .instrument(tracing::info_span!("ClientDisconnect", user_id = %user_id))
@@ -635,6 +652,162 @@ fn recording_channel_has_human_members(inner: &InnerReceiver) -> Option<bool> {
     }
 
     Some(false)
+}
+
+fn paused_timeout_matches(current_token: Option<u64>, timeout_token: u64) -> bool {
+    current_token == Some(timeout_token)
+}
+
+async fn pause_recording_for_rejoin(inner: &Arc<InnerReceiver>, user_id: u64, ssrc: u32) {
+    let recording = inner.ssrc_writer_hashmap.write().await.remove(&ssrc);
+    let Some(recording) = recording else {
+        warn!(
+            user_id,
+            ssrc, "ClientDisconnect had no active writer to pause"
+        );
+        return;
+    };
+
+    {
+        let _rec = recording.lock().await;
+    }
+    let paused_at = chrono::Utc::now();
+    let token = inner.paused_recording_token.fetch_add(1, Ordering::SeqCst);
+    let paused = PausedRecording {
+        recording,
+        ssrc,
+        paused_at,
+        token,
+    };
+
+    let previous = inner
+        .paused_recordings
+        .write()
+        .await
+        .insert(user_id, paused.clone());
+    if let Some(previous) = previous {
+        warn!(
+            user_id,
+            previous_ssrc = previous.ssrc,
+            "Replacing existing paused recording for user"
+        );
+        finalize_recording_arc(
+            inner,
+            previous.ssrc,
+            previous.recording,
+            VoiceEventType::WriterClose,
+            previous.paused_at,
+        )
+        .await;
+    }
+
+    super::voice::insert_voice_event(
+        &inner.pool,
+        inner.guild_id.get() as i64,
+        Some(inner.channel_id.get() as i64),
+        user_id as i64,
+        super::voice::EVT_USER_RECORDING_PAUSE,
+    )
+    .await;
+
+    info!(
+        user_id,
+        ssrc,
+        timeout_ms = USER_REJOIN_RESUME_TIMEOUT_MS,
+        "Paused recording for user rejoin"
+    );
+    schedule_user_rejoin_resume_timeout(inner, user_id, token);
+}
+
+async fn resume_paused_recording(inner: &Arc<InnerReceiver>, user_id: u64, ssrc: u32) -> bool {
+    let paused = inner.paused_recordings.write().await.remove(&user_id);
+    let Some(paused) = paused else {
+        return false;
+    };
+
+    let now = chrono::Utc::now();
+    let gap_ms = now
+        .signed_duration_since(paused.paused_at)
+        .num_milliseconds();
+    let frames = silence_frames_for_gap_ms(gap_ms);
+
+    {
+        let mut rec = paused.recording.lock().await;
+        if let Err(err) = rec.writer.write_silence(frames) {
+            error!(
+                user_id,
+                old_ssrc = paused.ssrc,
+                new_ssrc = ssrc,
+                "Failed to write user rejoin silence: {}",
+                err
+            );
+        }
+        rec.ssrc = ssrc;
+    }
+
+    inner
+        .ssrc_writer_hashmap
+        .write()
+        .await
+        .insert(ssrc, paused.recording);
+    inner.user_id_hashmap.write().await.insert(user_id, ssrc);
+
+    super::voice::insert_voice_event(
+        &inner.pool,
+        inner.guild_id.get() as i64,
+        Some(inner.channel_id.get() as i64),
+        user_id as i64,
+        super::voice::EVT_USER_RECORDING_RESUME,
+    )
+    .await;
+
+    info!(
+        user_id,
+        old_ssrc = paused.ssrc,
+        new_ssrc = ssrc,
+        gap_ms,
+        frames,
+        "Resumed paused user recording"
+    );
+    true
+}
+
+fn schedule_user_rejoin_resume_timeout(inner: &Arc<InnerReceiver>, user_id: u64, token: u64) {
+    let inner = Arc::clone(inner);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            USER_REJOIN_RESUME_TIMEOUT_MS,
+        ))
+        .await;
+
+        let paused = {
+            let mut paused_recordings = inner.paused_recordings.write().await;
+            if paused_timeout_matches(paused_recordings.get(&user_id).map(|p| p.token), token) {
+                paused_recordings.remove(&user_id)
+            } else {
+                None
+            }
+        };
+
+        let Some(paused) = paused else {
+            return;
+        };
+
+        warn!(
+            user_id,
+            ssrc = paused.ssrc,
+            timeout_ms = USER_REJOIN_RESUME_TIMEOUT_MS,
+            "User rejoin resume timed out. Closing recording."
+        );
+        finalize_recording_arc(
+            &inner,
+            paused.ssrc,
+            paused.recording,
+            VoiceEventType::WriterClose,
+            paused.paused_at,
+        )
+        .await;
+    });
 }
 
 fn schedule_recoverable_disconnect_timeout(inner: &Arc<InnerReceiver>, disconnected_at_ms: i64) {
@@ -752,10 +925,26 @@ async fn finalize_all_active_recordings(inner: &Arc<InnerReceiver>, event_type: 
     for ssrc in ssrcs {
         finalize_writer_at(inner, ssrc, event_type, close_time).await;
     }
+
+    let paused_recordings: Vec<PausedRecording> = {
+        let mut paused = inner.paused_recordings.write().await;
+        paused.drain().map(|(_, recording)| recording).collect()
+    };
+    for paused in paused_recordings {
+        finalize_recording_arc(
+            inner,
+            paused.ssrc,
+            paused.recording,
+            event_type,
+            paused.paused_at,
+        )
+        .await;
+    }
 }
 
 async fn clear_receiver_state(inner: &Arc<InnerReceiver>) {
     inner.user_id_hashmap.write().await.clear();
+    inner.paused_recordings.write().await.clear();
     inner.bot_ssrcs.write().await.clear();
     inner.bot_user_id_hashmap.write().await.clear();
     inner.session_start_ms.store(0, Ordering::SeqCst);
@@ -780,6 +969,16 @@ async fn finalize_writer_at(
         return;
     };
 
+    finalize_recording_arc(inner, ssrc, arc, event_type, close_time).await;
+}
+
+async fn finalize_recording_arc(
+    inner: &Arc<InnerReceiver>,
+    ssrc: u32,
+    arc: Arc<Mutex<UserRecording>>,
+    event_type: VoiceEventType,
+    close_time: chrono::DateTime<chrono::Utc>,
+) {
     // Lock the writer to wait out any in-flight tick write, then finalize.
     // We don't try to unwrap the Arc; we just clone the metadata we need
     // and let the Arc drop naturally after this scope.
@@ -928,6 +1127,35 @@ mod tests {
         assert_eq!(silence_frames_for_gap_ms(21), 2);
         assert_eq!(silence_frames_for_gap_ms(40), 2);
         assert_eq!(silence_frames_for_gap_ms(41), 3);
+    }
+
+    #[test]
+    fn ten_minute_user_rejoin_gap_maps_to_silence_frames() {
+        assert_eq!(
+            silence_frames_for_gap_ms(USER_REJOIN_RESUME_TIMEOUT_MS as i64),
+            30_000
+        );
+    }
+
+    #[test]
+    fn stale_user_rejoin_timeout_does_not_match_new_pause_token() {
+        assert!(paused_timeout_matches(Some(7), 7));
+        assert!(!paused_timeout_matches(Some(8), 7));
+        assert!(!paused_timeout_matches(None, 7));
+    }
+
+    #[test]
+    fn user_recording_resume_events_are_distinct_from_bot_resume_events() {
+        assert_ne!(
+            super::super::voice::EVT_USER_RECORDING_PAUSE,
+            super::super::voice::EVT_RECORDING_PAUSE
+        );
+        assert_ne!(
+            super::super::voice::EVT_USER_RECORDING_RESUME,
+            super::super::voice::EVT_RECORDING_RESUME
+        );
+        assert_eq!(super::super::voice::EVT_USER_RECORDING_PAUSE, 20);
+        assert_eq!(super::super::voice::EVT_USER_RECORDING_RESUME, 21);
     }
 
     #[test]
