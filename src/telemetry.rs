@@ -21,11 +21,13 @@ pub fn init_telemetry() -> Result<(), Box<dyn Error + Send + Sync>> {
         .with_tonic()
         .build()?;
 
+    let instance_id = std::env::var("BOT_INSTANCE_ID")
+        .unwrap_or_else(|_| format!("{}-{}", crate::config::SERVICE_NAME, std::process::id()));
     let resource = Resource::builder_empty()
-        .with_attributes([opentelemetry::KeyValue::new(
-            "service.name",
-            crate::config::SERVICE_NAME,
-        )])
+        .with_attributes([
+            opentelemetry::KeyValue::new("service.name", crate::config::SERVICE_NAME),
+            opentelemetry::KeyValue::new("service.instance.id", instance_id),
+        ])
         .build();
 
     let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()

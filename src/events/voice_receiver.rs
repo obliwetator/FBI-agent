@@ -78,6 +78,7 @@ pub struct InnerReceiver {
     metrics: Arc<crate::BotMetrics>,
     guild_metrics: Arc<crate::GuildRecordingMetrics>,
     channel_metrics: Arc<crate::GuildRecordingMetrics>,
+    recording_owner_instance_id: String,
     pub last_voice_packet_time: AtomicI64,
     /// Wallclock millisecond when the first non-bot user joined this session.
     /// 0 = inactive. Used to pad new joiners' files with leading silence so
@@ -110,6 +111,14 @@ impl Receiver {
     ) -> Self {
         let guild_metrics = metrics.guild_metrics(guild_id.get());
         let channel_metrics = metrics.channel_metrics(guild_id.get(), channel_id.get());
+        let recording_owner_instance_id = {
+            let data = ctx.data.read().await;
+            data.get::<crate::runtime::RuntimeStateKey>()
+                .map(|runtime| runtime.config().instance_id.clone())
+                .unwrap_or_else(|| {
+                    format!("{}-{}", crate::config::SERVICE_NAME, std::process::id())
+                })
+        };
         let inner = Arc::new(InnerReceiver {
             pool,
             ctx_main: ctx,
@@ -124,9 +133,22 @@ impl Receiver {
             metrics,
             guild_metrics,
             channel_metrics,
+            recording_owner_instance_id,
             last_voice_packet_time: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
             session_start_ms: AtomicI64::new(0),
             disconnected_at_ms: AtomicI64::new(0),
+        });
+
+        let heartbeat_inner_weak = Arc::downgrade(&inner);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                let Some(inner_clone) = heartbeat_inner_weak.upgrade() else {
+                    break;
+                };
+                heartbeat_active_recordings(&inner_clone).await;
+            }
         });
 
         // Spawn Health Checker / Reaper
@@ -404,18 +426,6 @@ impl VoiceEventHandler for Receiver {
                 // Raw RTP — unused; we read Opus payload from VoiceTick instead.
             }
             Ctx::VoiceTick(tick) => {
-                if !tick.speaking.is_empty() {
-                    let now = chrono::Utc::now().timestamp_millis();
-                    self.inner
-                        .last_voice_packet_time
-                        .store(now, Ordering::Relaxed);
-                    self.inner.metrics.track_last_voice_packet(
-                        &self.inner.guild_metrics,
-                        &self.inner.channel_metrics,
-                        now,
-                    );
-                }
-
                 // Snapshot the active SSRCs (skip bots).
                 let active: Vec<(u32, Arc<Mutex<UserRecording>>)> = {
                     let map = self.inner.ssrc_writer_hashmap.read().await;
@@ -467,6 +477,15 @@ impl VoiceEventHandler for Receiver {
                     let mut rec = recording.lock().await;
                     let result = match opus_bytes.as_deref() {
                         Some(bytes) if !bytes.is_empty() => {
+                            let now = chrono::Utc::now().timestamp_millis();
+                            self.inner
+                                .last_voice_packet_time
+                                .store(now, Ordering::Relaxed);
+                            self.inner.metrics.track_last_voice_packet(
+                                &self.inner.guild_metrics,
+                                &self.inner.channel_metrics,
+                                now,
+                            );
                             self.inner.metrics.track_audio_packet_received(
                                 &self.inner.guild_metrics,
                                 &self.inner.channel_metrics,
@@ -1021,7 +1040,9 @@ async fn finalize_recording_arc(
 
     if let Err(err) = sqlx::query!(
         "UPDATE audio_files
-            SET end_ts = audio_files.start_ts + $1, state_leave = $2
+            SET end_ts = audio_files.start_ts + $1,
+                state_leave = $2,
+                recording_heartbeat_at = NULL
             WHERE file_name = $3",
         time_elapsed,
         state,
@@ -1079,8 +1100,8 @@ async fn create_path(
 
     match sqlx::query!(
         "INSERT INTO audio_files
-	(file_name, guild_id, channel_id, user_id, year, month, start_ts, end_ts, state_enter) VALUES
-	($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+	(file_name, guild_id, channel_id, user_id, year, month, start_ts, end_ts, state_enter, recording_owner_instance_id, recording_heartbeat_at) VALUES
+	($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())",
         file_name,
         guild_id.get() as i64,
         channel_id.get() as i64,
@@ -1089,7 +1110,8 @@ async fn create_path(
         now.month() as i32,
         now.timestamp_millis(),
         null,
-        if is_channel_empty { 1 } else { 2 }
+        if is_channel_empty { 1 } else { 2 },
+        _self.inner.recording_owner_instance_id.clone()
     )
     .execute(&_self.inner.pool)
     .await
@@ -1112,6 +1134,44 @@ async fn create_path(
     };
 
     Some(combined_path.to_string_lossy().into_owned())
+}
+
+async fn heartbeat_active_recordings(inner: &Arc<InnerReceiver>) {
+    let mut file_names = HashSet::new();
+    {
+        let active = inner.ssrc_writer_hashmap.read().await;
+        for recording in active.values() {
+            let recording = recording.lock().await;
+            file_names.insert(recording.file_name.clone());
+        }
+    }
+    {
+        let paused = inner.paused_recordings.read().await;
+        for recording in paused.values() {
+            let recording = recording.recording.lock().await;
+            file_names.insert(recording.file_name.clone());
+        }
+    }
+
+    if file_names.is_empty() {
+        return;
+    }
+
+    let file_names = file_names.into_iter().collect::<Vec<_>>();
+    if let Err(err) = sqlx::query(
+        "UPDATE audio_files
+            SET recording_heartbeat_at = now()
+          WHERE file_name = ANY($1)
+            AND recording_owner_instance_id = $2
+            AND end_ts IS NULL",
+    )
+    .bind(&file_names)
+    .bind(&inner.recording_owner_instance_id)
+    .execute(&inner.pool)
+    .await
+    {
+        warn!("recording heartbeat failed: {}", err);
+    }
 }
 
 #[cfg(test)]

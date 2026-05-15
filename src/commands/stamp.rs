@@ -109,6 +109,14 @@ pub async fn handle_stamp(
         r#"SELECT id FROM audio_files
            WHERE user_id = $1 AND guild_id = $2 AND channel_id = $3
              AND start_ts <= $4 AND end_ts IS NULL
+             AND EXISTS (
+                 SELECT 1
+                   FROM bot_instances bi
+                  WHERE bi.instance_id = audio_files.recording_owner_instance_id
+                    AND audio_files.recording_heartbeat_at > now() - interval '120 seconds'
+                    AND bi.heartbeat_at > now() - interval '120 seconds'
+                    AND bi.state <> 'stopped'
+             )
            ORDER BY start_ts DESC
            LIMIT 1"#,
         target.get() as i64,

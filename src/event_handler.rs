@@ -27,6 +27,7 @@ use crate::{database, events, get_lock_read};
 pub struct Handler {
     pub(crate) database: Pool<Postgres>,
     pub(crate) jam_cooldown: crate::cooldown::JamCooldown,
+    pub(crate) runtime: std::sync::Arc<crate::runtime::RuntimeState>,
 }
 
 #[async_trait]

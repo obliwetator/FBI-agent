@@ -282,6 +282,10 @@ pub async fn voice_state_update(
     old_state: Option<serenity::model::prelude::VoiceState>,
     new_state: serenity::model::prelude::VoiceState,
 ) {
+    if should_skip_voice_state_for_lease(_self, new_state.guild_id).await {
+        return;
+    }
+
     // Persist voice events for non-bot users (timeline overlay on recordings).
     let is_bot = new_state
         .member
@@ -364,7 +368,12 @@ pub async fn voice_state_update(
         }
 
         if let Some(channel_id) = empty_channel_candidate(&new_state, &ctx, &old_state).await {
-            schedule_leave_if_still_empty(ctx.clone(), guild_id, channel_id);
+            schedule_leave_if_still_empty(
+                ctx.clone(),
+                _self.database.clone(),
+                guild_id,
+                channel_id,
+            );
             return;
         }
 
@@ -407,6 +416,24 @@ pub async fn voice_state_update(
         }
     } else {
         error!("No member in new_state");
+    }
+}
+
+async fn should_skip_voice_state_for_lease(handler: &Handler, guild_id: Option<GuildId>) -> bool {
+    let Some(guild_id) = guild_id else {
+        return handler.runtime.is_draining();
+    };
+
+    match crate::deployment::active_lease_owner(&handler.database, guild_id).await {
+        Ok(Some(owner)) => owner != handler.runtime.config().instance_id,
+        Ok(None) => handler.runtime.is_draining(),
+        Err(err) => {
+            warn!(
+                guild_id = guild_id.get(),
+                "failed to inspect voice lease before voice-state routing: {}", err
+            );
+            handler.runtime.is_draining()
+        }
     }
 }
 
@@ -455,7 +482,12 @@ async fn human_member_count(ctx: &Context, channel_id: ChannelId) -> Result<usiz
     Ok(members.len())
 }
 
-fn schedule_leave_if_still_empty(ctx: Context, guild_id: GuildId, channel_id: ChannelId) {
+fn schedule_leave_if_still_empty(
+    ctx: Context,
+    pool: Pool<Postgres>,
+    guild_id: GuildId,
+    channel_id: ChannelId,
+) {
     tokio::spawn(async move {
         info!(
             guild_id = guild_id.get(),
@@ -502,7 +534,7 @@ fn schedule_leave_if_still_empty(ctx: Context, guild_id: GuildId, channel_id: Ch
                     channel_id = channel_id.get(),
                     "empty channel leave confirmed"
                 );
-                leave_voice_channel(&ctx, guild_id).await;
+                leave_voice_channel(&ctx, &pool, guild_id).await;
             }
             Ok(count) => {
                 info!(
@@ -587,7 +619,7 @@ async fn get_channel_with_most_members(
     Some((highest_channel_id, highest_channel_len))
 }
 
-async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
+async fn leave_voice_channel(ctx: &Context, pool: &Pool<Postgres>, guild_id: GuildId) {
     let Some(manager) = songbird::get(ctx).await else {
         error!("Songbird manager missing while leaving voice channel");
         return;
@@ -603,6 +635,9 @@ async fn leave_voice_channel(ctx: &Context, guild_id: GuildId) {
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             let _ = metrics.update_tx.send(());
         }
+        if let Some(runtime) = data_read.get::<crate::runtime::RuntimeStateKey>() {
+            crate::deployment::release_voice_session(pool, runtime, guild_id).await;
+        }
     }
 }
 
@@ -613,11 +648,41 @@ pub async fn connect_to_voice_channel(
     channel_id: ChannelId,
     user_id: u64,
 ) {
+    if crate::runtime::is_draining_ctx(ctx).await {
+        info!(
+            guild_id = guild_id.get(),
+            channel_id = channel_id.get(),
+            "skipping voice connect while instance is draining"
+        );
+        return;
+    }
+
     let Some(manager) = songbird::get(ctx).await else {
         error!("Songbird manager missing while connecting to voice channel");
         return;
     };
     let manager = manager.clone();
+
+    if let Some(runtime) = crate::runtime::state_from_ctx(ctx).await {
+        match crate::deployment::active_lease_owner(&pool, guild_id).await {
+            Ok(Some(owner)) if owner != runtime.config().instance_id => {
+                info!(
+                    guild_id = guild_id.get(),
+                    channel_id = channel_id.get(),
+                    owner = %owner,
+                    "skipping voice connect because another instance owns lease"
+                );
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(
+                    guild_id = guild_id.get(),
+                    "failed to inspect voice lease before join: {}", err
+                );
+            }
+        }
+    }
 
     if let Some(arc_call) = manager.get(guild_id) {
         // already have call, check current channel
@@ -689,7 +754,15 @@ async fn join_ch(
         let result = {
             let mut handler = handler_lock.lock().await;
             if matches!(mode, JoinMode::Fresh) {
-                register_voice_receiver(&mut handler, pool, ctx, guild_id, channel_id, true).await;
+                register_voice_receiver(
+                    &mut handler,
+                    pool.clone(),
+                    ctx,
+                    guild_id,
+                    channel_id,
+                    true,
+                )
+                .await;
             }
             handler.join(channel_id).await
         };
@@ -698,6 +771,12 @@ async fn join_ch(
             Ok(join) => match join.await {
                 Ok(()) => {
                     record_active_voice_connection(ctx).await;
+                    if let Some(runtime) = crate::runtime::state_from_ctx(ctx).await {
+                        crate::deployment::claim_voice_session(
+                            &pool, &runtime, guild_id, channel_id,
+                        )
+                        .await;
+                    }
                 }
                 Err(err) => {
                     error!("cannot join channel {}: {}", channel_id, err);
@@ -721,6 +800,9 @@ async fn join_ch(
         Ok(_) => {
             // switching channels. Don't re-register. Cleanup
             info!("Clean up switching chanels");
+            if let Some(runtime) = crate::runtime::state_from_ctx(ctx).await {
+                crate::deployment::claim_voice_session(&pool, &runtime, guild_id, channel_id).await;
+            }
         }
         Err(err) => {
             error!("cannot join channel {}: {}", channel_id, err);

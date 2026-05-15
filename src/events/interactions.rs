@@ -11,6 +11,11 @@ use tracing::warn;
 use crate::event_handler::Handler;
 
 pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Interaction) {
+    if should_skip_interaction(_self, &interaction).await {
+        warn!("Ignoring interaction because another instance owns this guild");
+        return;
+    }
+
     match interaction {
         Interaction::Ping(_) => {
             warn!("Unhandled interaction type: Ping");
@@ -148,6 +153,32 @@ pub async fn interaction_create(_self: &Handler, ctx: Context, interaction: Inte
         }
         _ => {
             warn!("Unhandled unknown interaction type");
+        }
+    }
+}
+
+async fn should_skip_interaction(handler: &Handler, interaction: &Interaction) -> bool {
+    let guild_id = match interaction {
+        Interaction::Command(command) => command.guild_id,
+        Interaction::Component(component) => component.guild_id,
+        Interaction::Autocomplete(autocomplete) => autocomplete.guild_id,
+        Interaction::Modal(modal) => modal.guild_id,
+        _ => None,
+    };
+
+    let Some(guild_id) = guild_id else {
+        return handler.runtime.is_draining();
+    };
+
+    match crate::deployment::active_lease_owner(&handler.database, guild_id).await {
+        Ok(Some(owner)) => owner != handler.runtime.config().instance_id,
+        Ok(None) => handler.runtime.is_draining(),
+        Err(err) => {
+            warn!(
+                guild_id = guild_id.get(),
+                "failed to inspect voice lease before interaction routing: {}", err
+            );
+            handler.runtime.is_draining()
         }
     }
 }

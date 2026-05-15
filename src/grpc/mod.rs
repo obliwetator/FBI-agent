@@ -4,6 +4,7 @@ pub mod hello_world {
     tonic::include_proto!("helloworld");
 }
 
+mod admin;
 mod dashboard;
 mod jammer;
 mod snapshot;

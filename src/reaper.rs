@@ -3,8 +3,9 @@
 //! Recording end is written by the leave/disconnect path in
 //! `events/voice_receiver.rs`. If the bot crashed or was killed before that
 //! ran, rows stay `end_ts IS NULL` forever and pollute "live" detection in
-//! the web UI. By definition nothing can still be live across a process
-//! restart, so on startup we close every NULL row.
+//! the web UI. A NULL end timestamp only means "not finalized"; it is live
+//! only while the row's recording heartbeat is fresh and owned by a fresh,
+//! non-stopped bot instance.
 //!
 //! Default mode: row stays, `end_ts = start_ts`, `reaped = TRUE`. Files on
 //! disk are left alone — they may still be partially playable. Audit them
@@ -18,14 +19,22 @@
 //! `hls-{stem}/` cache dir, then `DELETE FROM audio_files` for those rows.
 //! Use after a long zombie buildup when you don't want to inspect each one.
 //!
-//! `bot_reaper_state.last_reap_ts` lets us skip rows already covered by an
-//! earlier reap so we don't rescan history every boot.
+//! `bot_reaper_state.last_reap_ts` records when the startup reaper last ran.
+//! We still rescan all unfinished rows because a row can be skipped while its
+//! voice lease is live and become reapable later.
 
 use chrono::{DateTime, Datelike, Utc};
 use sakiot_paths::{RECORDING_ROOT, RecordingKey};
 use sqlx::{Pool, Postgres};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
+
+struct ZombieRecording {
+    file_name: String,
+    guild_id: i64,
+    channel_id: i64,
+    start_ts: Option<i64>,
+}
 
 pub async fn reap_zombie_recordings(pool: &Pool<Postgres>) {
     let purge = std::env::var("REAPER_PURGE")
@@ -53,11 +62,19 @@ pub async fn reap_zombie_recordings(pool: &Pool<Postgres>) {
             }
         };
 
-    let zombies = match sqlx::query!(
+    let zombies = match sqlx::query_as!(
+        ZombieRecording,
         "SELECT file_name, guild_id, channel_id, start_ts
            FROM audio_files
-          WHERE end_ts IS NULL AND start_ts > $1",
-        last_reap_ts
+          WHERE end_ts IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM bot_instances bi
+                 WHERE bi.instance_id = audio_files.recording_owner_instance_id
+                   AND audio_files.recording_heartbeat_at > now() - interval '120 seconds'
+                   AND bi.heartbeat_at > now() - interval '120 seconds'
+                   AND bi.state <> 'stopped'
+            )"
     )
     .fetch_all(pool)
     .await
@@ -118,8 +135,16 @@ pub async fn reap_zombie_recordings(pool: &Pool<Postgres>) {
 
     let rows_changed = if purge {
         match sqlx::query!(
-            "DELETE FROM audio_files WHERE end_ts IS NULL AND start_ts > $1",
-            last_reap_ts
+            "DELETE FROM audio_files
+              WHERE end_ts IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM bot_instances bi
+                     WHERE bi.instance_id = audio_files.recording_owner_instance_id
+                       AND audio_files.recording_heartbeat_at > now() - interval '120 seconds'
+                       AND bi.heartbeat_at > now() - interval '120 seconds'
+                       AND bi.state <> 'stopped'
+                )"
         )
         .execute(pool)
         .await
@@ -134,8 +159,15 @@ pub async fn reap_zombie_recordings(pool: &Pool<Postgres>) {
         match sqlx::query!(
             "UPDATE audio_files
                 SET end_ts = start_ts, reaped = TRUE
-                WHERE end_ts IS NULL AND start_ts > $1",
-            last_reap_ts
+                WHERE end_ts IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                        FROM bot_instances bi
+                       WHERE bi.instance_id = audio_files.recording_owner_instance_id
+                         AND audio_files.recording_heartbeat_at > now() - interval '120 seconds'
+                         AND bi.heartbeat_at > now() - interval '120 seconds'
+                         AND bi.state <> 'stopped'
+                  )"
         )
         .execute(pool)
         .await

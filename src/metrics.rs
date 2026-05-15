@@ -97,6 +97,26 @@ pub struct BotMetrics {
     pub tokio_active_tasks: AtomicU32,
 }
 
+fn deployment_release_id(instance_id: &str) -> String {
+    std::env::var("RELEASE_ID")
+        .ok()
+        .filter(|release_id| !release_id.is_empty())
+        .or_else(|| {
+            instance_id
+                .rsplit_once('-')
+                .map(|(_, release_id)| release_id.to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn deployment_labels(runtime: &crate::runtime::RuntimeState, release_id: &str) -> Vec<KeyValue> {
+    vec![
+        KeyValue::new("instance_id", runtime.config().instance_id.clone()),
+        KeyValue::new("release_id", release_id.to_string()),
+        KeyValue::new("role", runtime.role().as_str()),
+    ]
+}
+
 impl BotMetrics {
     /// Returns the metrics entry for `guild_id`, creating it on first access.
     pub fn guild_metrics(&self, guild_id: u64) -> Arc<GuildRecordingMetrics> {
@@ -114,8 +134,9 @@ impl BotMetrics {
     }
 
     /// Registers standard BotMetrics instruments to OpenTelemetry.
-    pub fn register_otel_metrics(metrics: Arc<Self>) {
+    pub fn register_otel_metrics(metrics: Arc<Self>, runtime: Arc<crate::runtime::RuntimeState>) {
         let meter = opentelemetry::global::meter(crate::config::SERVICE_NAME);
+        let release_id = deployment_release_id(runtime.config().instance_id.as_str());
 
         macro_rules! u32_counter {
             ($name:literal, $desc:literal, $field:ident) => {
@@ -415,6 +436,110 @@ impl BotMetrics {
             .with_description("Bot process health: 1 while the process exports metrics")
             .with_callback(|observer| observer.observe(1, &[]))
             .build();
+
+        {
+            let r = runtime.clone();
+            let release_id = release_id.clone();
+            meter
+                .u64_observable_gauge("bot_instance_info")
+                .with_description("Bot deployment instance metadata")
+                .with_callback(move |observer| {
+                    let labels = deployment_labels(&r, release_id.as_str());
+                    observer.observe(1, &labels);
+                })
+                .build();
+        }
+
+        {
+            let m = metrics.clone();
+            let r = runtime.clone();
+            let release_id = release_id.clone();
+            meter
+                .u64_observable_gauge("bot_instance_uptime_seconds")
+                .with_description("Bot deployment instance uptime in seconds")
+                .with_unit("s")
+                .with_callback(move |observer| {
+                    let labels = deployment_labels(&r, release_id.as_str());
+                    observer.observe(m.start_time.elapsed().as_secs(), &labels);
+                })
+                .build();
+        }
+
+        {
+            let m = metrics.clone();
+            let r = runtime.clone();
+            let release_id = release_id.clone();
+            meter
+                .u64_observable_gauge("bot_instance_voice_connections")
+                .with_description("Current active voice connections for this deployment instance")
+                .with_callback(move |observer| {
+                    let labels = deployment_labels(&r, release_id.as_str());
+                    observer.observe(
+                        m.active_voice_connections
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as u64,
+                        &labels,
+                    );
+                })
+                .build();
+        }
+
+        {
+            let m = metrics.clone();
+            let r = runtime.clone();
+            let release_id = release_id.clone();
+            meter
+                .u64_observable_gauge("bot_instance_active_recordings")
+                .with_description("Current active recordings for this deployment instance")
+                .with_callback(move |observer| {
+                    let labels = deployment_labels(&r, release_id.as_str());
+                    observer.observe(
+                        m.active_recordings
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as u64,
+                        &labels,
+                    );
+                })
+                .build();
+        }
+
+        {
+            let r = runtime.clone();
+            let release_id = release_id.clone();
+            meter
+                .u64_observable_gauge("bot_instance_draining")
+                .with_description("Bot deployment instance drain state: 1 while draining")
+                .with_callback(move |observer| {
+                    let labels = deployment_labels(&r, release_id.as_str());
+                    observer.observe(if r.is_draining() { 1 } else { 0 }, &labels);
+                })
+                .build();
+        }
+
+        {
+            let r = runtime.clone();
+            let release_id = release_id.clone();
+            meter
+                .u64_observable_gauge("bot_instance_shutdown_when_empty")
+                .with_description("Bot deployment instance exits when voice is empty: 1 when armed")
+                .with_callback(move |observer| {
+                    let labels = deployment_labels(&r, release_id.as_str());
+                    observer.observe(if r.shutdown_when_empty() { 1 } else { 0 }, &labels);
+                })
+                .build();
+        }
+
+        {
+            let r = runtime.clone();
+            meter
+                .u64_observable_gauge("bot_instance_force_shutdown_requested")
+                .with_description("Bot deployment force shutdown state: 1 after force requested")
+                .with_callback(move |observer| {
+                    let labels = deployment_labels(&r, release_id.as_str());
+                    observer.observe(if r.force_shutdown_requested() { 1 } else { 0 }, &labels);
+                })
+                .build();
+        }
 
         {
             let m = metrics.clone();
