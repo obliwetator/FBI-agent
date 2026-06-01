@@ -40,15 +40,13 @@ pub(in crate::events) async fn insert_voice_event(
     user_id: i64,
     event_type_id: i32,
 ) {
-    if let Err(err) = sqlx::query!(
-        "INSERT INTO voice_state_events (guild_id, channel_id, user_id, event_type_id) \
-         VALUES ($1, $2, $3, $4)",
+    if let Err(err) = crate::database::voice_events::insert_voice_state_event(
+        pool,
         guild_id,
         channel_id,
         user_id,
-        event_type_id
+        event_type_id,
     )
-    .execute(pool)
     .await
     {
         warn!("Failed to insert voice_state_event: {}", err);
