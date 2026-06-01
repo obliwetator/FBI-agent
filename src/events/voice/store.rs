@@ -55,33 +55,6 @@ pub(in crate::events) async fn insert_voice_event(
     }
 }
 
-pub(super) async fn insert_voice_connection_event(
-    pool: &Pool<Postgres>,
-    guild_id: i64,
-    channel_id: Option<i64>,
-    owner_instance_id: Option<&str>,
-    event_type: &str,
-    reason: Option<&str>,
-    details: Option<&str>,
-) {
-    if let Err(err) = sqlx::query(
-        "INSERT INTO voice_connection_events
-            (guild_id, channel_id, owner_instance_id, event_type, reason, details)
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(guild_id)
-    .bind(channel_id)
-    .bind(owner_instance_id)
-    .bind(event_type)
-    .bind(reason)
-    .bind(details)
-    .execute(pool)
-    .await
-    {
-        warn!("Failed to insert voice_connection_event: {}", err);
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ChannelTransition {
     Joined(ChannelId),
